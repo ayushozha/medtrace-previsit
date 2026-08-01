@@ -5,9 +5,9 @@ import { CopilotChatConfigurationProvider } from '@copilotkit/react-core/v2';
 import '@copilotkit/react-core/v2/styles.css';
 
 import { DashboardHome } from '../DashboardHome';
-import { DASHBOARD_AGENT_ID } from './collabTypes';
+import { CHART_ROUTER_AGENT_ID } from './collabTypes';
 
-/** Lazy-loaded patient chart with additive CopilotKit collaboration. */
+/** Lazy-loaded patient chart with unified CopilotKit auto-router chat. */
 export function PatientChartWorkspace() {
   const { patientId } = useParams<{ patientId: string }>();
   const navigate = useNavigate();
@@ -18,9 +18,9 @@ export function PatientChartWorkspace() {
       runtimeUrl="/api/copilotkit"
       useSingleEndpoint={false}
       showDevConsole={import.meta.env.DEV}
-      agent={DASHBOARD_AGENT_ID}
+      agent={CHART_ROUTER_AGENT_ID}
     >
-      <CopilotChatConfigurationProvider agentId={DASHBOARD_AGENT_ID}>
+      <CopilotChatConfigurationProvider agentId={CHART_ROUTER_AGENT_ID}>
         <DashboardHome
           patientId={patientId}
           onBack={() => navigate('/patients')}

@@ -18,11 +18,14 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 from copilotkit import LangGraphAGUIAgent  # noqa: E402
 from ag_ui_langgraph import add_langgraph_fastapi_endpoint  # noqa: E402
 from agent import graph  # noqa: E402
+from chart_router_agent import chart_router_graph  # noqa: E402
+from clinical_memory_agent import clinical_memory_graph  # noqa: E402
 from dashboard_agent import dashboard_graph  # noqa: E402
 from voice_handler import VoicePipeline  # noqa: E402
 from database import save_session, get_all_sessions, update_session_report  # noqa: E402
 from datetime import datetime  # noqa: E402
 import uuid  # noqa: E402
+import httpx  # noqa: E402
 
 DATA_REPORTS_DIR = os.path.join(os.path.dirname(__file__), "data", "reports")
 
@@ -59,16 +62,72 @@ add_langgraph_fastapi_endpoint(
     path="/dashboard",
 )
 
+# Clinical memory (Zep/FHIR Q&A via apps/api) — specialist used by chart_router
+add_langgraph_fastapi_endpoint(
+    app=app,
+    agent=LangGraphAGUIAgent(
+        name="clinical_memory",
+        description="Patient chart clinical memory Q&A (Zep + FHIR via MedTrace API)",
+        graph=clinical_memory_graph,
+    ),
+    path="/memory",
+)
+
+# Auto-router supervisor for the patient-chart CopilotKit chat
+add_langgraph_fastapi_endpoint(
+    app=app,
+    agent=LangGraphAGUIAgent(
+        name="chart_router",
+        description="Routes chart chat to collab UI updates or clinical memory",
+        graph=chart_router_graph,
+    ),
+    path="/router",
+)
+
 class SaveSessionRequest(BaseModel):
     audio_base64: str
     duration: str
+    patient_id: str = Field(min_length=1)
 
 @app.get("/api/sessions")
-async def get_sessions_endpoint():
+async def get_sessions_endpoint(patient_id: str | None = None):
     """
     Fetch all saved voice sessions from SQLite.
     """
-    return get_all_sessions()
+    return get_all_sessions(patient_id)
+
+
+async def persist_canonical_consultation(
+    *,
+    patient_id: str,
+    session_id: str,
+    timestamp: str,
+    duration: str,
+    transcript: str,
+    report: str,
+    audio_base64: str | None = None,
+) -> dict:
+    base_url = (os.environ.get("MEDTRACE_API_BASE_URL") or "http://127.0.0.1:8001").rstrip("/")
+    payload = {
+        "consultation_id": session_id,
+        "recorded_at": timestamp,
+        "duration": duration,
+        "transcript": transcript,
+        "report": report,
+        "audio_base64": audio_base64,
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            f"{base_url}/api/patients/{patient_id}/consultations",
+            json=payload,
+        )
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = None
+        raise RuntimeError(str(detail or f"Canonical Medplum write failed ({response.status_code})."))
+    return response.json()
 
 @app.post("/api/sessions")
 async def save_session_endpoint(request: SaveSessionRequest):
@@ -101,14 +160,26 @@ async def save_session_endpoint(request: SaveSessionRequest):
 
         timestamp = datetime.now().isoformat()
 
-        # Persist to SQLite
+        # Medplum is canonical.  Do not present a SQLite-only session as saved.
+        await persist_canonical_consultation(
+            patient_id=request.patient_id,
+            session_id=session_id,
+            timestamp=timestamp,
+            duration=request.duration,
+            transcript=transcript,
+            report=agent_result["document"],
+            audio_base64=request.audio_base64,
+        )
+
+        # Derived local cache used by the prototype session list.
         save_session(
             session_id=session_id,
             timestamp=timestamp,
             duration=request.duration,
             transcript=transcript,
             report=agent_result["document"],
-            audio_base64=request.audio_base64
+            audio_base64=request.audio_base64,
+            patient_id=request.patient_id,
         )
 
         return {
@@ -117,7 +188,8 @@ async def save_session_endpoint(request: SaveSessionRequest):
             "duration": request.duration,
             "transcript": transcript,
             "report": agent_result["document"],
-            "audio_base64": request.audio_base64
+            "audio_base64": request.audio_base64,
+            "patient_id": request.patient_id,
         }
     except Exception as e:
         print(f"Error saving session: {e}")
@@ -125,6 +197,7 @@ async def save_session_endpoint(request: SaveSessionRequest):
 
 class GenerateReportRequest(BaseModel):
     session_id: str
+    patient_id: str = Field(min_length=1)
     transcript: str = ""
     current_report_text: str = ""
     regenerate: bool = Field(
@@ -176,6 +249,14 @@ async def generate_report_endpoint(request: GenerateReportRequest):
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(report_body)
 
+        canonical = await persist_canonical_consultation(
+            patient_id=request.patient_id,
+            session_id=request.session_id,
+            timestamp=datetime.now().isoformat(),
+            duration="",
+            transcript=request.transcript,
+            report=report_body,
+        )
         db_ok = update_session_report(request.session_id, report_body)
 
         return {
@@ -185,6 +266,9 @@ async def generate_report_endpoint(request: GenerateReportRequest):
             "report": report_body,
             "database_updated": db_ok,
             "regenerated": did_regenerate,
+            "medplum_synced": True,
+            "encounter_id": canonical.get("encounter_id"),
+            "document_ids": canonical.get("document_ids", {}),
         }
     except Exception as e:
         print(f"Error generate-report: {e}")

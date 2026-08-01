@@ -14,6 +14,7 @@ from medtrace_agent.medplum_repository import (
     FACT_SYSTEM,
     MedplumRepository,
     ZEP_USER_SYSTEM,
+    binary_id_from_url,
 )
 
 
@@ -133,6 +134,42 @@ def test_update_uses_version_if_match_and_surfaces_conflict(
         )
     assert captured["If-Match"] == 'W/"7"'
     assert caught.value.status_code == 412
+
+
+def test_binary_upload_sets_patient_security_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: response(
+            200,
+            {"access_token": "token", "expires_in": 3600},
+            "http://localhost:8103/oauth2/token",
+        ),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs["headers"])
+        return response(201, {"resourceType": "Binary", "id": "b1"}, url)
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    result = MedplumClient(client_id="client", client_secret="secret").create_binary(
+        b"synthetic",
+        content_type="text/plain",
+        security_context="Patient/p1",
+    )
+    assert result["id"] == "b1"
+    assert captured["X-Security-Context"] == "Patient/p1"
+
+
+def test_binary_id_parses_fhir_and_self_hosted_storage_urls() -> None:
+    assert binary_id_from_url("Binary/binary-1") == "binary-1"
+    assert (
+        binary_id_from_url("http://localhost:8103/storage/binary-2/object-key?Signature=test")
+        == "binary-2"
+    )
 
 
 def test_client_rejects_external_pagination_link(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,15 +16,24 @@ app.use(cors({
 
 const agentBase = process.env.AGENT_URL || "http://localhost:8010";
 
+const base = agentBase.replace(/\/$/, "");
+
 const runtime = new CopilotRuntime({
   agents: {
     // /session document co-editor — leave behavior unchanged
     predictive_state_updates: new LangGraphHttpAgent({
       url: agentBase,
     }),
-    // /patients/:id checklist collaboration (additive)
+    // Patient chart: auto-router (default UI agent)
+    chart_router: new LangGraphHttpAgent({
+      url: `${base}/router`,
+    }),
+    // Specialists (kept for debugging / direct use; router embeds collab+memory)
     dashboard_clinical: new LangGraphHttpAgent({
-      url: `${agentBase.replace(/\/$/, "")}/dashboard`,
+      url: `${base}/dashboard`,
+    }),
+    clinical_memory: new LangGraphHttpAgent({
+      url: `${base}/memory`,
     }),
   },
 });

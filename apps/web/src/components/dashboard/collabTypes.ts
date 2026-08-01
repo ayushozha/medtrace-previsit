@@ -1,3 +1,5 @@
+import type { ChecklistItemRecord } from '@/lib/types';
+
 export type ClinicalFocusType = 'lab' | 'condition' | 'med' | 'alert';
 
 export interface ChecklistItem {
@@ -27,12 +29,17 @@ export interface DashboardAgentState {
   focus?: ClinicalFocus | null;
 }
 
+/** @deprecated Prefer CHART_ROUTER_AGENT_ID — kept for direct specialist debugging. */
 export const DASHBOARD_AGENT_ID = 'dashboard_clinical';
 
-export function checklistFromSnapshot(items: string[]): ChecklistItem[] {
-  return items.map((text, index) => ({
-    id: `chk-${index}`,
-    text,
-    done: false,
+/** Patient-chart CopilotKit auto-router (collab UI + clinical memory). */
+export const CHART_ROUTER_AGENT_ID = 'chart_router';
+
+export function checklistFromSnapshot(items: ChecklistItemRecord[]): ChecklistItem[] {
+  return items.map((item) => ({
+    id: item.id,
+    text: item.text,
+    done: item.done,
+    ...(item.agent_note ? { agentNote: item.agent_note } : {}),
   }));
 }

@@ -300,6 +300,11 @@ a.clinical-home-cta {
   box-sizing: border-box;
 }
 
+/* Leave room for AppNav (3.5rem) + PatientModeSwitcher (3rem). */
+.clinical-app-layout--with-patient-bar {
+  inset: 6.5rem 0 0;
+}
+
 .clinical-main-content {
   flex: 1;
   min-height: 0;

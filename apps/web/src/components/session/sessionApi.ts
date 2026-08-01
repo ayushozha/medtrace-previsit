@@ -11,6 +11,7 @@ export const TRANSCRIPTION_API_BASE = RAW_BASE.replace(/\/$/, '');
 
 export interface SessionRecord {
   id: string;
+  patient_id: string;
   timestamp: string;
   duration: string;
   transcript: string;
@@ -29,8 +30,9 @@ async function detailOf(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-export async function listSessions(signal?: AbortSignal): Promise<SessionRecord[]> {
-  const res = await fetch(`${TRANSCRIPTION_API_BASE}/api/sessions`, { signal });
+export async function listSessions(patientId: string, signal?: AbortSignal): Promise<SessionRecord[]> {
+  const query = new URLSearchParams({ patient_id: patientId });
+  const res = await fetch(`${TRANSCRIPTION_API_BASE}/api/sessions?${query}`, { signal });
   if (!res.ok) throw new Error(await detailOf(res, `Failed to load sessions (${res.status})`));
   const data = await res.json();
   return Array.isArray(data) ? (data as SessionRecord[]) : [];
@@ -39,11 +41,12 @@ export async function listSessions(signal?: AbortSignal): Promise<SessionRecord[
 export async function createSession(
   audioBase64: string,
   duration: string,
+  patientId: string,
 ): Promise<SessionRecord> {
   const res = await fetch(`${TRANSCRIPTION_API_BASE}/api/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ audio_base64: audioBase64, duration }),
+    body: JSON.stringify({ audio_base64: audioBase64, duration, patient_id: patientId }),
   });
   if (!res.ok) throw new Error(await detailOf(res, `Transcription failed (${res.status})`));
   const session = (await res.json()) as SessionRecord & { error?: string };
@@ -56,10 +59,18 @@ export interface GenerateReportResponse {
   database_updated?: boolean;
   filename?: string;
   regenerated?: boolean;
+  medplum_synced?: boolean;
+  encounter_id?: string;
+  document_ids?: {
+    transcript?: string;
+    report?: string;
+    audio?: string;
+  };
 }
 
 export async function generateReport(body: {
   session_id: string;
+  patient_id: string;
   transcript: string;
   current_report_text: string;
   regenerate: boolean;

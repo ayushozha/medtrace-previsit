@@ -6,6 +6,7 @@ import {
   FileText,
   HeartPulse,
   Loader2,
+  Pencil,
   RefreshCw,
   Sparkles,
   Stethoscope,
@@ -17,8 +18,14 @@ import { DocumentLibrary } from './DocumentLibrary';
 import { AIChatPanel } from './AIChatPanel';
 import { DashboardCollabLayer } from './dashboard/DashboardCollabLayer';
 import { useDashboardCollab } from './dashboard/DashboardCollabContext';
+import { PatientModeSwitcher, PatientVisitLaunchpad } from './PatientVisitNav';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import type { ClinicalSnapshot, RiskLevel } from '@/lib/types';
+import type { Patient } from '@/lib/types';
+import { apiPatch } from '@/lib/api';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 interface DashboardHomeProps {
   patientId: string;
@@ -34,6 +41,88 @@ const priorityClass: Record<RiskLevel, string> = {
   Medium: 'border-yellow-200 bg-yellow-50 text-yellow-900',
   Low: 'border-slate-200 bg-slate-50 text-slate-700',
 };
+
+function EditPatientButton({ patient, onSaved }: { patient: Patient; onSaved: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(patient.name);
+  const [dob, setDob] = useState(patient.dob ?? '');
+  const [sex, setSex] = useState(patient.sex);
+  const [doctor, setDoctor] = useState(patient.primary_doctor ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const openEditor = () => {
+    setName(patient.name);
+    setDob(patient.dob ?? '');
+    setSex(patient.sex);
+    setDoctor(patient.primary_doctor ?? '');
+    setError('');
+    setOpen(true);
+  };
+
+  const save = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      await apiPatch(`/api/patients/${patient.id}`, {
+        display_name: name.trim(),
+        dob: dob || null,
+        sex,
+        primary_doctor: doctor.trim() || null,
+      });
+      setOpen(false);
+      onSaved();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update the Medplum Patient.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={openEditor}
+        className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+      >
+        <Pencil size={12} /> Edit FHIR details
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit canonical patient</DialogTitle>
+            <DialogDescription>These fields update the Medplum Patient resource directly.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Display name" />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input type="date" value={dob} onChange={(event) => setDob(event.target.value)} />
+              <select
+                value={sex}
+                onChange={(event) => setSex(event.target.value as Patient['sex'])}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="O">Unknown / other</option>
+                <option value="F">Female</option>
+                <option value="M">Male</option>
+              </select>
+            </div>
+            <Input value={doctor} onChange={(event) => setDoctor(event.target.value)} placeholder="Primary clinician" />
+            {error && <p className="text-xs text-red-600">{error}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={() => void save()} disabled={saving || !name.trim()}>
+              {saving ? 'Saving…' : 'Save in Medplum'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 export function DashboardHome({
   patientId,
@@ -112,19 +201,13 @@ function DashboardBody({
     ['DOB', patient.dob ?? '-'],
   ];
 
-  // Local checklist fallback when CopilotKit collab is not mounted.
   const collab = useDashboardCollab();
-  const [checkedItems, setCheckedItems] = useState<ReadonlySet<string>>(new Set());
-  const toggleChecklistItem = (item: string) => {
-    setCheckedItems((prev) => {
-      const next = new Set(prev);
-      if (next.has(item)) {
-        next.delete(item);
-      } else {
-        next.add(item);
-      }
-      return next;
-    });
+  const toggleChecklistItem = (item: { id: string; text: string; done: boolean; agent_note?: string | null }) => {
+    void apiPatch(`/api/patients/${patient.id}/checklist/${item.id}`, {
+      text: item.text,
+      done: !item.done,
+      agent_note: item.agent_note ?? null,
+    }).then(onRefresh);
   };
 
   const focusKey = collab?.focus?.key?.toLowerCase() ?? '';
@@ -136,9 +219,11 @@ function DashboardBody({
     // xl layout: flex row with `gap-4` (1rem) between the dashboard column
     // and the chat panel. The chat panel is a sticky flex sibling (no longer
     // position:fixed) so the gap is exactly 16px regardless of viewport width.
-    <div className="mx-auto min-h-screen w-full max-w-[1440px] px-4 py-4 sm:px-6 lg:px-8">
-      <div className="xl:flex xl:items-start xl:gap-4">
-      <div className="min-w-0 xl:flex-1">
+    <div>
+      <PatientModeSwitcher patientId={patient.id} patientName={patient.name} active="chart" />
+      <div className="mx-auto min-h-screen w-full max-w-[1440px] px-4 py-4 sm:px-6 lg:px-8">
+      <div className="lg:flex lg:items-start lg:gap-4">
+      <div className="min-w-0 lg:flex-1">
       <header className="clinical-panel mb-4 overflow-hidden">
         <div className="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center gap-4">
@@ -174,7 +259,10 @@ function DashboardBody({
           </div>
 
           <div className="flex flex-col items-stretch gap-2 lg:w-[540px]">
-            {headerAction ? <div className="flex justify-end">{headerAction}</div> : null}
+            <div className="flex justify-end gap-2">
+              {headerAction}
+              <EditPatientButton patient={patient} onSaved={onRefresh} />
+            </div>
             <div className="grid gap-2 sm:grid-cols-4">
             {patientMeta.map(([label, value]) => (
               <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
@@ -188,6 +276,8 @@ function DashboardBody({
       </header>
 
       <main className="min-w-0 space-y-4">
+          <PatientVisitLaunchpad patientId={patient.id} />
+
           <section className="clinical-panel p-4">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
@@ -452,27 +542,25 @@ function DashboardBody({
               <div className="grid gap-3">
                 {(collab?.checklist?.length
                   ? collab.checklist
-                  : snapshot.doctor_checklist.map((text, index) => ({
-                      id: `local-${index}`,
-                      text,
-                      done: checkedItems.has(text),
-                      agentNote: undefined as string | undefined,
+                  : snapshot.doctor_checklist_items.map((item) => ({
+                      ...item,
+                      agentNote: item.agent_note ?? undefined,
                     }))
                 ).map((item) => {
                   const checked = item.done;
                   return (
-                    <label key={item.id} className="group flex cursor-pointer items-start gap-3">
-                      <input
-                        type="checkbox"
-                        className="sr-only"
-                        checked={checked}
-                        onChange={() =>
-                          collab
-                            ? collab.toggleChecklistItem(item.id)
-                            : toggleChecklistItem(item.text)
-                        }
-                      />
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="group flex w-full cursor-pointer items-start gap-3 text-left"
+                      onClick={() =>
+                        collab
+                          ? collab.toggleChecklistItem(item.id)
+                          : toggleChecklistItem(item)
+                      }
+                    >
                       <div
+                        aria-hidden
                         className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all duration-200 ${
                           checked ? 'border-blue-500 bg-blue-500' : 'border-slate-700 group-hover:border-blue-500'
                         }`}
@@ -495,7 +583,7 @@ function DashboardBody({
                           <p className="mt-1 text-[10px] leading-4 text-blue-300/90">{item.agentNote}</p>
                         ) : null}
                       </div>
-                    </label>
+                    </button>
                   );
                 })}
               </div>
@@ -504,8 +592,8 @@ function DashboardBody({
         </main>
       </div>
 
-        <aside className="mt-4 xl:sticky xl:top-4 xl:mt-0 xl:w-[480px] xl:shrink-0 xl:self-start">
-          <div className="flex h-[560px] flex-col overflow-hidden rounded-xl border border-border bg-white shadow-[0_1px_3px_0_rgb(15_23_42_/_0.08)] xl:h-[calc(100vh-2rem)]">
+        <aside className="mt-4 lg:sticky lg:top-[7.25rem] lg:mt-0 lg:w-[400px] lg:shrink-0 lg:self-start xl:w-[480px]">
+          <div className="flex h-[560px] flex-col overflow-hidden rounded-xl border border-border bg-white shadow-[0_1px_3px_0_rgb(15_23_42_/_0.08)] lg:h-[calc(100vh-8.25rem)]">
             {collab?.aside ?? (
               <AIChatPanel
                 patientId={patient.id}
@@ -517,6 +605,7 @@ function DashboardBody({
             )}
           </div>
         </aside>
+      </div>
       </div>
     </div>
   );

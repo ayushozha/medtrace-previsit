@@ -31,12 +31,15 @@ import { AudioVisualizer, LiveAudioVisualizer, base64ToBlob } from './audioVisua
 import { ConfirmChanges } from './ConfirmChanges';
 import { fromMarkdown, toMarkdown } from './markdown';
 import { createSession, generateReport, listSessions, type SessionRecord } from './sessionApi';
+import { usePatients } from '@/hooks/usePatients';
+import { PatientModeSwitcher } from '@/components/PatientVisitNav';
 
 const AGENT_ID = 'predictive_state_updates';
 const extensions = [StarterKit];
 
 const DRAFT_SESSION: SessionRecord = {
   id: 'local-draft-session',
+  patient_id: '',
   timestamp: '',
   duration: '0:00',
   transcript: '',
@@ -87,7 +90,12 @@ function parseTranscript(rawText: string): TranscriptLine[] {
     });
 }
 
-function DocumentEditor() {
+function DocumentEditor({ lockedPatientId }: { lockedPatientId?: string }) {
+  const { patients } = usePatients();
+  const [selectedPatientId, setSelectedPatientId] = useState(lockedPatientId ?? '');
+  const patientLocked = Boolean(lockedPatientId);
+  const lockedPatientName =
+    patients.find((p) => p.id === (lockedPatientId ?? selectedPatientId))?.name ?? 'Patient';
   // `currentDocument` is the accepted document as **markdown** — the editor is only a view of
   // it. Deriving it from the editor instead would strip the markers the agent needs.
   const [currentDocument, setCurrentDocument] = useState('');
@@ -130,9 +138,11 @@ function DocumentEditor() {
   const [errorMsg, setErrorMsg] = useState('');
   const [aiBubbleDismissed, setAiBubbleDismissed] = useState(false);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
-  const [reportActionMsg, setReportActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(
-    null,
-  );
+  const [reportActionMsg, setReportActionMsg] = useState<{
+    kind: 'ok' | 'err';
+    text: string;
+    medplumDocumentUrl?: string;
+  } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -171,8 +181,18 @@ function DocumentEditor() {
   );
 
   useEffect(() => {
+    if (lockedPatientId) setSelectedPatientId(lockedPatientId);
+  }, [lockedPatientId]);
+
+  useEffect(() => {
+    if (patientLocked) return;
+    if (!selectedPatientId && patients.length > 0) setSelectedPatientId(patients[0].id);
+  }, [patients, patientLocked, selectedPatientId]);
+
+  useEffect(() => {
+    if (!selectedPatientId) return;
     const controller = new AbortController();
-    listSessions(controller.signal)
+    listSessions(selectedPatientId, controller.signal)
       .then((data) => {
         setSessions([DRAFT_SESSION, ...data]);
         loadSession(DRAFT_SESSION);
@@ -184,7 +204,7 @@ function DocumentEditor() {
     return () => controller.abort();
     // Mount-only: loadSession is recreated whenever the editor instance changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedPatientId]);
 
   const handleSessionCreated = (newSession: SessionRecord) => {
     setSessions((prev) => [newSession, ...prev.filter((s) => s.id !== DRAFT_SESSION.id)]);
@@ -201,7 +221,8 @@ function DocumentEditor() {
         reader.onerror = () => reject(new Error('Could not read the audio file.'));
         reader.readAsDataURL(blob);
       });
-      handleSessionCreated(await createSession(base64Audio, duration));
+      if (!selectedPatientId) throw new Error('Select a canonical Medplum patient first.');
+      handleSessionCreated(await createSession(base64Audio, duration, selectedPatientId));
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to transcribe audio.');
     } finally {
@@ -279,6 +300,7 @@ function DocumentEditor() {
     try {
       const data = await generateReport({
         session_id: activeSession.id,
+        patient_id: activeSession.patient_id || selectedPatientId,
         transcript: activeSession.transcript || '',
         current_report_text: currentText,
         regenerate: true,
@@ -293,8 +315,13 @@ function DocumentEditor() {
       setReportActionMsg({
         kind: 'ok',
         text: `${data.regenerated ? 'Report generated from transcript.' : 'Report exported.'}${
-          data.database_updated ? ' Saved to the session database.' : ''
+          data.medplum_synced ? ' Saved to Medplum.' : ''
+        }${data.database_updated ? ' Local session cache updated.' : ''}${
+          data.document_ids?.report ? ` DocumentReference: ${data.document_ids.report}.` : ''
         }${data.filename ? ` File: ${data.filename}.` : ''}`,
+        medplumDocumentUrl: data.document_ids?.report
+          ? `${(import.meta.env.VITE_MEDPLUM_APP_URL ?? 'http://localhost:3002').replace(/\/$/, '')}/DocumentReference/${data.document_ids.report}`
+          : undefined,
       });
     } catch (e) {
       setReportActionMsg({
@@ -511,11 +538,38 @@ function DocumentEditor() {
                   {errorMsg && <p className="consultation-error">{errorMsg}</p>}
                   {!errorMsg && !sessionHasAudio && !isRecording && (
                     <p className="consultation-hint">
-                      No audio for this session — the waveform appears after you record or upload.
+                      {patientLocked
+                        ? `Recording for ${lockedPatientName} — waveform appears after you record or upload.`
+                        : 'No audio for this session — the waveform appears after you record or upload.'}
                     </p>
                   )}
                 </div>
                 <div className="consultation-header-actions">
+                  {patientLocked ? (
+                    <span
+                      className="inline-flex h-8 max-w-[220px] items-center truncate rounded-md border border-blue-200 bg-blue-50 px-2 text-xs font-semibold text-primary"
+                      title={lockedPatientName}
+                    >
+                      {lockedPatientName}
+                    </span>
+                  ) : (
+                    <select
+                      className="h-8 max-w-[220px] rounded-md border border-slate-300 bg-white px-2 text-xs text-slate-800"
+                      aria-label="Canonical patient"
+                      value={selectedPatientId}
+                      disabled={isRecording || isUploading}
+                      onChange={(event) => setSelectedPatientId(event.target.value)}
+                    >
+                      <option value="" disabled>
+                        Select Medplum patient
+                      </option>
+                      {patients.map((patient) => (
+                        <option key={patient.id} value={patient.id}>
+                          {patient.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   {isRecording ? (
                     <button
                       type="button"
@@ -687,7 +741,17 @@ function DocumentEditor() {
                 }`}
                 role="status"
               >
-                {reportActionMsg.text}
+                {reportActionMsg.text}{' '}
+                {reportActionMsg.medplumDocumentUrl && (
+                  <a
+                    href={reportActionMsg.medplumDocumentUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-semibold underline underline-offset-2"
+                  >
+                    Open in Medplum
+                  </a>
+                )}
               </p>
             )}
             <div className="tiptap-clinical-container">
@@ -771,7 +835,10 @@ function DocumentEditor() {
 }
 
 /** Voice consultation → diarized transcript → agent-assisted clinical report. */
-export function SessionWorkspace() {
+export function SessionWorkspace({ patientId }: { patientId?: string }) {
+  const { patients } = usePatients();
+  const patientName = patients.find((p) => p.id === patientId)?.name ?? 'Patient';
+
   return (
     <CopilotKit
       runtimeUrl="/api/copilotkit"
@@ -780,11 +847,25 @@ export function SessionWorkspace() {
       agent={AGENT_ID}
     >
       <CopilotChatConfigurationProvider agentId={AGENT_ID}>
-        <div className="clinical-app-layout">
-          <main className="clinical-main-content">
-            <DocumentEditor />
-          </main>
-        </div>
+        <>
+          {patientId ? (
+            <PatientModeSwitcher
+              patientId={patientId}
+              patientName={patientName}
+              active="session"
+              tone="light"
+            />
+          ) : null}
+          <div
+            className={
+              patientId ? 'clinical-app-layout clinical-app-layout--with-patient-bar' : 'clinical-app-layout'
+            }
+          >
+            <main className="clinical-main-content">
+              <DocumentEditor lockedPatientId={patientId} />
+            </main>
+          </div>
+        </>
       </CopilotChatConfigurationProvider>
     </CopilotKit>
   );

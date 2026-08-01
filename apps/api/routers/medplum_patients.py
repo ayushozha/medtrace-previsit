@@ -11,6 +11,7 @@ from apps.api.schemas import (
     AlertOut,
     AllergyOut,
     ClinicalSnapshotOut,
+    ChecklistItemOut,
     ConditionOut,
     CreatePatientIn,
     DocumentOut,
@@ -19,6 +20,8 @@ from apps.api.schemas import (
     MedicationOut,
     PatientOut,
     TimelineEvent,
+    UpdateChecklistItemIn,
+    UpdatePatientIn,
 )
 from medtrace_agent.medplum import MedplumError
 from medtrace_agent.medplum_repository import repository
@@ -92,6 +95,21 @@ def get_patient(patient_id: str) -> PatientOut:
         raise_medplum_http(exc)
 
 
+@router.patch("/{patient_id}", response_model=PatientOut, dependencies=[RequireMedplumDep])
+def update_patient(patient_id: str, body: UpdatePatientIn) -> PatientOut:
+    updates = body.model_dump(exclude_unset=True)
+    if "display_name" in updates and not str(updates["display_name"] or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="display_name cannot be empty.")
+    repo = repository()
+    try:
+        patient = repo.update_patient(patient_id, updates)
+        if not patient:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
+        return _view_with_summary(patient, repo.clinical_resources(patient_id))
+    except MedplumError as exc:
+        raise_medplum_http(exc)
+
+
 @router.post("/{patient_id}/summary", response_model=PatientOut, dependencies=[RequireMedplumDep])
 def regenerate_summary(patient_id: str) -> PatientOut:
     # Summaries are response-only cognitive aids; no AI prose is written back to FHIR.
@@ -118,6 +136,11 @@ def get_snapshot(patient_id: str) -> ClinicalSnapshotOut:
             "Review automatically extracted records before clinical use",
             "Confirm medication and allergy history with the patient",
         ]
+        checklist_items = repo.checklist_views(
+            patient_id=patient_id,
+            resources=resources,
+            suggestions=checklist,
+        )
         return ClinicalSnapshotOut(
             patient=patient,
             insights=insights,
@@ -130,6 +153,36 @@ def get_snapshot(patient_id: str) -> ClinicalSnapshotOut:
             timeline=timeline,
             documents=documents,
             doctor_checklist=checklist,
+            doctor_checklist_items=[ChecklistItemOut.model_validate(item) for item in checklist_items],
+        )
+    except MedplumError as exc:
+        raise_medplum_http(exc)
+
+
+@router.patch(
+    "/{patient_id}/checklist/{item_id}",
+    response_model=ChecklistItemOut,
+    dependencies=[RequireMedplumDep],
+)
+def update_checklist_item(
+    patient_id: str,
+    item_id: str,
+    body: UpdateChecklistItemIn,
+) -> ChecklistItemOut:
+    _patient_or_404(patient_id)
+    try:
+        task = repository().upsert_checklist_item(
+            patient_id=patient_id,
+            item_id=item_id,
+            text=body.text,
+            done=body.done,
+            agent_note=body.agent_note,
+        )
+        return ChecklistItemOut(
+            id=item_id,
+            text=str(task.get("description") or body.text),
+            done=task.get("status") == "completed",
+            agent_note=str((task.get("businessStatus") or {}).get("text") or "") or None,
         )
     except MedplumError as exc:
         raise_medplum_http(exc)

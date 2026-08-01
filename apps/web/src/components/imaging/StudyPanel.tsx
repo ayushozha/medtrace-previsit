@@ -1,7 +1,7 @@
 import { type ChangeEvent, useRef } from 'react';
 import { CircleDot, FileImage } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { ReviewDecision, Study } from '@/lib/types';
+import type { Patient, ReviewDecision, Study } from '@/lib/types';
 
 const DECISION_COLOR: Record<ReviewDecision, string> = {
   accepted: 'text-emerald-300',
@@ -15,13 +15,30 @@ function StatusDot({ decision }: { decision: ReviewDecision }) {
 
 interface StudyPanelProps {
   studies: Study[];
+  patients: Patient[];
+  selectedPatientId: string;
+  /** When true, patient comes from the chart route — hide the picker. */
+  patientLocked?: boolean;
+  uploadError?: string | null;
   activeStudyId: string;
   onFiles: (files: File[]) => void;
+  onPatientChange: (patientId: string) => void;
   onSelectStudy: (studyId: string) => void;
 }
 
-export function StudyPanel({ studies, activeStudyId, onFiles, onSelectStudy }: StudyPanelProps) {
+export function StudyPanel({
+  studies,
+  patients,
+  selectedPatientId,
+  patientLocked = false,
+  uploadError,
+  activeStudyId,
+  onFiles,
+  onPatientChange,
+  onSelectStudy,
+}: StudyPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lockedPatient = patients.find((p) => p.id === selectedPatientId);
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -42,14 +59,42 @@ export function StudyPanel({ studies, activeStudyId, onFiles, onSelectStudy }: S
           accept=".dcm,.dicom,application/dicom"
           onChange={handleFileInput}
         />
+        <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+          {patientLocked ? 'Studies for' : 'Canonical patient'}
+        </label>
+        {patientLocked ? (
+          <div className="mb-3 rounded-md border border-cyan-400/20 bg-cyan-400/5 px-3 py-2">
+            <p className="truncate text-sm font-semibold text-cyan-50">
+              {lockedPatient?.name ?? 'Selected patient'}
+            </p>
+            <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500">{selectedPatientId}</p>
+          </div>
+        ) : (
+          <select
+            className="mb-3 h-9 w-full rounded-md border border-slate-700 bg-slate-950 px-2 text-sm text-slate-200"
+            value={selectedPatientId}
+            onChange={(event) => onPatientChange(event.target.value)}
+          >
+            <option value="" disabled>
+              Select a Medplum patient
+            </option>
+            {patients.map((patient) => (
+              <option key={patient.id} value={patient.id}>
+                {patient.name}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           className="flex w-full items-center justify-center gap-2 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/15"
           type="button"
+          disabled={!selectedPatientId}
           onClick={() => fileInputRef.current?.click()}
         >
           <FileImage className="h-4 w-4" />
           Upload DICOM
         </button>
+        {uploadError && <p className="mt-2 text-xs leading-5 text-red-300">{uploadError}</p>}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">

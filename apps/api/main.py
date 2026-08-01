@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from apps.api.routers import (  # noqa: E402
     demo,
+    medplum_consultations,
     medplum_clinical,
     medplum_documents,
     medplum_patients,
@@ -110,6 +111,7 @@ app.include_router(medplum_patients.router)
 app.include_router(medplum_documents.router)
 app.include_router(medplum_threads.router)
 app.include_router(medplum_clinical.router)
+app.include_router(medplum_consultations.router)
 app.include_router(studies.router)
 app.include_router(demo.router)
 

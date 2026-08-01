@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ImagingStatus, RoiBox, Segmentation, Study } from '@/lib/types';
+import type { ImagingStatus, RoiBox, Segmentation, Study, StudyUpload } from '@/lib/types';
 import {
   fetchImagingStatus,
+  fetchStudies,
   requestReport,
   requestSegmentation,
+  reviewReport,
   uploadStudy,
 } from '@/lib/imagingApi';
+import { usePatients } from '@/hooks/usePatients';
+import { PatientModeSwitcher } from '@/components/PatientVisitNav';
 import { StudyPanel } from './StudyPanel';
 import { ViewerWorkspace } from './ViewerWorkspace';
 import type { VoiRange } from './DicomViewport';
@@ -15,6 +19,8 @@ import { DEFAULT_ROI, isDicomFile } from './roi';
 
 const EMPTY_STUDY: Study = {
   id: 'NO-DICOM',
+  patient_id: '',
+  fhir_imaging_study_id: '',
   patient_name: 'No DICOM loaded',
   patient_detail: 'Upload a study',
   modality: 'DICOM',
@@ -41,9 +47,33 @@ const EMPTY_STUDY: Study = {
 
 const MOCK_STATUS: ImagingStatus = { provider: 'mock', fireworks_configured: false, model: null };
 
+function toStudy(upload: StudyUpload): Study {
+  return {
+    ...upload,
+    timestamp: upload.uploaded_at?.slice(0, 10) || 'Medplum',
+    status: 'ready',
+    reviewDecision: upload.review_decision ?? 'unreviewed',
+    reviewNote: upload.review_note ?? undefined,
+    segmentations: [],
+    report:
+      upload.report ??
+      {
+        summary: 'Awaiting AI review',
+        findings: 'Generate a preliminary report after reviewing the DICOM series.',
+        impression: 'Pending AI draft and clinician review.',
+        recommendation: 'Select an ROI if a suspicious region is present.',
+        confidence: 0,
+        source: 'mock',
+      },
+  };
+}
+
 /** DICOM upload → ROI segmentation → draft report → doctor review, all in one screen. */
-export function ImagingWorkspace() {
+export function ImagingWorkspace({ patientId }: { patientId?: string }) {
+  const { patients } = usePatients();
   const [studies, setStudies] = useState<Study[]>([]);
+  const [selectedPatientId, setSelectedPatientId] = useState(patientId ?? '');
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [activeStudyId, setActiveStudyId] = useState<string | null>(null);
   const [segmentVisible, setSegmentVisible] = useState(true);
   const [zoom, setZoom] = useState(100);
@@ -53,9 +83,16 @@ export function ImagingWorkspace() {
   const [layout, setLayout] = useState<'stack' | 'mpr'>('stack');
   const [imagingStatus, setImagingStatus] = useState<ImagingStatus>(MOCK_STATUS);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const patientLocked = Boolean(patientId);
+  const patientName =
+    patients.find((p) => p.id === (patientId ?? selectedPatientId))?.name ?? 'Patient';
 
   const study = studies.find((s) => s.id === activeStudyId) ?? studies[0] ?? EMPTY_STUDY;
   const hasLoadedStudy = study.id !== EMPTY_STUDY.id;
+
+  useEffect(() => {
+    if (patientId) setSelectedPatientId(patientId);
+  }, [patientId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -64,6 +101,31 @@ export function ImagingWorkspace() {
       .catch(() => setImagingStatus(MOCK_STATUS));
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (patientLocked) return;
+    if (!selectedPatientId && patients.length > 0) setSelectedPatientId(patients[0].id);
+  }, [patients, patientLocked, selectedPatientId]);
+
+  useEffect(() => {
+    if (!selectedPatientId) {
+      setStudies([]);
+      setActiveStudyId(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetchStudies(controller.signal, selectedPatientId)
+      .then((rows) => {
+        const canonical = rows.map(toStudy);
+        setStudies(canonical);
+        setActiveStudyId(canonical[0]?.id ?? null);
+        setVoi(null);
+        setSliceIndex(0);
+        setLayout('stack');
+      })
+      .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not load Medplum studies.'));
+    return () => controller.abort();
+  }, [selectedPatientId]);
 
   const updateStudy = useCallback(
     (studyId: string, updater: (study: Study) => Study) => {
@@ -76,48 +138,23 @@ export function ImagingWorkspace() {
     // One study per drop: a DICOM series is many files that belong to a single volume,
     // so they are uploaded together rather than creating one study per slice.
     const dicoms = files.filter(isDicomFile);
-    if (dicoms.length > 0) {
-      const file = dicoms[0];
-
-      const fallback: Study = {
-        ...EMPTY_STUDY,
-        id: `LOCAL-${Date.now()}`,
-        patient_name: dicoms.length > 1 ? `${dicoms.length} slices` : file.name,
-        patient_detail: 'Local file',
-        body_part: 'Unspecified',
-        timestamp: 'Just now',
-        series: 'DICOM series',
-        slices: dicoms.length,
-        uploaded_file_name: file.name,
-        is_dicom: true,
-        report: {
-          summary: 'Awaiting AI review',
-          findings:
-            'The study is loaded locally. Run MedSAM2 segmentation or Fireworks VL report generation.',
-          impression: 'Pending AI draft and clinician review.',
-          recommendation: 'Select an ROI for segmentation if a suspicious region is present.',
-          confidence: 0,
-          source: 'mock',
-        },
-      };
-
-      let next = fallback;
+    if (dicoms.length > 0 && selectedPatientId) {
       try {
-        const uploaded = await uploadStudy(dicoms);
-        next = { ...fallback, ...uploaded };
-      } catch {
-        // Backend unavailable — keep the local placeholder so the viewer still opens.
-      }
+        setUploadError(null);
+        const uploaded = await uploadStudy(dicoms, selectedPatientId);
+        const next = toStudy(uploaded);
 
-      setStudies((current) => [next, ...current.filter((s) => s.id !== next.id)]);
-      setActiveStudyId(next.id);
-      setSegmentVisible(true);
-      // New study: drop the previous study's window/level and slice position.
-      setVoi(null);
-      setSliceIndex(0);
-      setLayout('stack');
+        setStudies((current) => [next, ...current.filter((s) => s.id !== next.id)]);
+        setActiveStudyId(next.id);
+        setSegmentVisible(true);
+        setVoi(null);
+        setSliceIndex(0);
+        setLayout('stack');
+      } catch (error) {
+        setUploadError(error instanceof Error ? error.message : 'DICOM upload failed.');
+      }
     }
-  }, []);
+  }, [selectedPatientId]);
 
   const runSegmentation = useCallback(
     async (prompt: RoiBox = DEFAULT_ROI) => {
@@ -196,58 +233,90 @@ export function ImagingWorkspace() {
   }, [imagingStatus.fireworks_configured, study.body_part, study.id, study.modality, study.segmentations, updateStudy]);
 
   return (
-    <div className="h-[calc(100vh-3.5rem)] overflow-hidden bg-[#05070b] text-slate-100">
-      <div className="grid h-full grid-cols-[280px_minmax(0,1fr)_390px] overflow-hidden max-xl:grid-cols-[240px_minmax(0,1fr)_360px] max-lg:grid-cols-1 max-lg:overflow-y-auto">
-        <StudyPanel
-          activeStudyId={study.id}
-          studies={studies}
-          onFiles={handleFiles}
-          onSelectStudy={(id) => {
-            setActiveStudyId(id);
-            setVoi(null);
-            setSliceIndex(0);
-            setLayout('stack');
-          }}
+    <div className="bg-[#05070b] text-slate-100">
+      {patientId ? (
+        <PatientModeSwitcher
+          patientId={patientId}
+          patientName={patientName}
+          active="imaging"
+          tone="dark"
         />
+      ) : null}
+      <div
+        className={
+          patientId
+            ? 'h-[calc(100vh-3.5rem-3rem)] overflow-hidden'
+            : 'h-[calc(100vh-3.5rem)] overflow-hidden'
+        }
+      >
+        <div className="grid h-full grid-cols-[280px_minmax(0,1fr)_390px] overflow-hidden max-xl:grid-cols-[240px_minmax(0,1fr)_360px] max-lg:grid-cols-1 max-lg:overflow-y-auto">
+          <StudyPanel
+            activeStudyId={study.id}
+            studies={studies}
+            patients={patients}
+            selectedPatientId={selectedPatientId}
+            patientLocked={patientLocked}
+            uploadError={uploadError}
+            onFiles={handleFiles}
+            onPatientChange={setSelectedPatientId}
+            onSelectStudy={(id) => {
+              setActiveStudyId(id);
+              setVoi(null);
+              setSliceIndex(0);
+              setLayout('stack');
+            }}
+          />
 
-        <ViewerWorkspace
-          voi={voi}
-          sliceIndex={sliceIndex}
-          layout={layout}
-          segmentVisible={segmentVisible}
-          study={study}
-          zoom={zoom}
-          canRunSegmentation={hasLoadedStudy}
-          onVoiChange={setVoi}
-          onVoiLoaded={({ defaultVoi }) => setVoi(defaultVoi)}
-          onSliceChange={setSliceIndex}
-          onLayoutChange={setLayout}
-          onRunSegmentation={runSegmentation}
-          onSegmentVisibleChange={setSegmentVisible}
-          onZoomChange={setZoom}
-          onFiles={handleFiles}
-        />
+          <ViewerWorkspace
+            voi={voi}
+            sliceIndex={sliceIndex}
+            layout={layout}
+            segmentVisible={segmentVisible}
+            study={study}
+            zoom={zoom}
+            canRunSegmentation={hasLoadedStudy}
+            onVoiChange={setVoi}
+            onVoiLoaded={({ defaultVoi }) => setVoi(defaultVoi)}
+            onSliceChange={setSliceIndex}
+            onLayoutChange={setLayout}
+            onRunSegmentation={runSegmentation}
+            onSegmentVisibleChange={setSegmentVisible}
+            onZoomChange={setZoom}
+            onFiles={handleFiles}
+          />
 
-        <DecisionPanel
-          imagingStatus={imagingStatus}
-          study={study}
-          canRunReport={hasLoadedStudy}
-          onAccept={() =>
-            updateStudy(study.id, (s) => ({ ...s, reviewDecision: 'accepted', reviewNote: undefined }))
-          }
-          onNeedsCorrection={() => {
-            updateStudy(study.id, (s) => ({ ...s, reviewDecision: 'needs-correction' }));
-            setFeedbackOpen(true);
-          }}
-          onRunReport={runReport}
-        />
+          <DecisionPanel
+            imagingStatus={imagingStatus}
+            study={study}
+            canRunReport={hasLoadedStudy}
+            onAccept={() => {
+              reviewReport(study.id, 'accepted')
+                .then(() => updateStudy(study.id, (s) => ({ ...s, reviewDecision: 'accepted', reviewNote: undefined })))
+                .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not save review.'));
+            }}
+            onNeedsCorrection={() => {
+              setFeedbackOpen(true);
+            }}
+            onRunReport={runReport}
+          />
+        </div>
       </div>
 
       <FeedbackDialog
         open={feedbackOpen}
         study={study}
         onOpenChange={setFeedbackOpen}
-        onSave={(note) => updateStudy(study.id, (s) => ({ ...s, reviewNote: note || undefined }))}
+        onSave={(note) => {
+          reviewReport(study.id, 'needs-correction', note)
+            .then(() =>
+              updateStudy(study.id, (s) => ({
+                ...s,
+                reviewDecision: 'needs-correction',
+                reviewNote: note || undefined,
+              })),
+            )
+            .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not save review.'));
+        }}
       />
     </div>
   );

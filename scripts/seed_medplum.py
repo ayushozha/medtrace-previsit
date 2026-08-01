@@ -10,7 +10,8 @@ from typing import Any
 
 from medtrace_agent.env import load_repo_env
 from medtrace_agent.medplum import medplum_configured
-from medtrace_agent.medplum_repository import FACT_SYSTEM, repository, utc_now
+from medtrace_agent.imaging import is_dicom_file
+from medtrace_agent.medplum_repository import DOCUMENT_SYSTEM, FACT_SYSTEM, repository, utc_now
 from medtrace_agent.synthetic_fixtures import load_synthetic_store
 
 
@@ -105,6 +106,12 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--store", type=Path)
     parser.add_argument("--include-zep", action="store_true", help="Reserved for importing existing Zep transcripts")
+    parser.add_argument(
+        "--include-dicom",
+        action="store_true",
+        help="Register existing synthetic DICOM studies in Medplum and upload one representative Binary per study",
+    )
+    parser.add_argument("--dicom-root", type=Path, default=Path("data/studies"))
     args = parser.parse_args()
     store = load_synthetic_store(args.store)
     charts = store.get("chart_subjects") or []
@@ -112,6 +119,9 @@ def main() -> None:
     sessions = store.get("chat_sessions") or []
     if args.dry_run:
         print(f"Would import {len(charts)} patients, {len(documents)} documents, and {len(sessions)} thread headers.")
+        if args.include_dicom:
+            directories = [path for path in sorted(args.dicom_root.glob("ST-*")) if path.is_dir()]
+            print(f"Would register up to {len(directories)} DICOM studies from {args.dicom_root}.")
         return
     if not medplum_configured():
         raise SystemExit("Configure Medplum before seeding; run `npm run medplum:bootstrap` first.")
@@ -121,6 +131,7 @@ def main() -> None:
     repo = repository()
     patient_ids: dict[str, str] = {}
     fact_count = 0
+    note_count = 0
     for row in charts:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         fields = metadata.get("fields") if isinstance(metadata.get("fields"), dict) else {}
@@ -138,6 +149,23 @@ def main() -> None:
         patient_ids[chart_id] = str(patient["id"])
         clinical = metadata.get("clinical") if isinstance(metadata.get("clinical"), dict) else {}
         fact_count += _seed_clinical(str(patient["id"]), chart_id, clinical)
+        notes = fields.get("notes")
+        if notes:
+            note_data = str(notes).encode("utf-8")
+            _note_doc, note_task = repo.create_document(
+                patient_id=str(patient["id"]),
+                data=note_data,
+                filename="Synthetic source note.txt",
+                content_type="text/plain; charset=utf-8",
+                document_kind="conversation_note",
+                extract_mode="synthetic-fixture",
+                source_doc_id=f"seed:{chart_id}:source-note",
+                uploaded_at=str(row.get("created_at") or utc_now()),
+                unverified=False,
+                tags=["synthetic", "source-note"],
+            )
+            repo.finish_task(note_task, episode_count=0)
+            note_count += 1
 
     for row in documents:
         chart_id = str(row.get("chart_subject_id") or "")
@@ -163,8 +191,34 @@ def main() -> None:
             document_kind=str(row.get("document_kind") or "clinical_pdf"),
             extract_mode=str(row.get("extract_mode") or "local_fixture"),
             source_doc_id=str(row.get("doc_id") or ""),
+            uploaded_at=str(row.get("uploaded_at") or utc_now()),
+            unverified=False,
+            tags=["synthetic", "historical-import"],
         )
         repo.finish_task(task, episode_count=int(row.get("episode_count") or 0))
+
+    dicom_count = 0
+    dicom_instance_count = 0
+    if args.include_dicom and patient_ids:
+        canonical_patients = [patient_ids[str(row.get("id") or "")] for row in charts if str(row.get("id") or "") in patient_ids]
+        for index, directory in enumerate(
+            path for path in sorted(args.dicom_root.glob("ST-*")) if path.is_dir()
+        ):
+            paths = [
+                path
+                for path in sorted(directory.iterdir())
+                if path.is_file() and is_dicom_file(path)
+            ]
+            if not paths:
+                continue
+            repo.upsert_imaging_study(
+                patient_id=canonical_patients[index % len(canonical_patients)],
+                study_id=directory.name,
+                paths=paths,
+                synthetic=True,
+            )
+            dicom_count += 1
+            dicom_instance_count += len(paths)
 
     for row in sessions:
         patient_id = patient_ids.get(str(row.get("chart_subject_id") or ""))
@@ -200,18 +254,34 @@ def main() -> None:
                     request_id=f"legacy-zep-{source_uuid}",
                 )
 
-    patient_total = len(repo.list_patients())
-    document_total = len(repo.client.search("DocumentReference", {"_count": 500}))
-    thread_total = len(repo.client.search("Communication", {
-        "category": "https://medtrace.local/fhir/code|ai-chat",
-        "part-of:missing": "true",
-        "_count": 500,
-    }))
-    print(f"Imported/reconciled {len(charts)} patients, {fact_count} facts, and {len(documents)} documents.")
+    patient_total = sum(1 for row in charts if repo.find_patient_by_zep(str(row.get("zep_user_id") or "")))
+    expected_documents = len(documents) + note_count
+    document_total = 0
+    for row in documents:
+        if repo.client.search_one("DocumentReference", {"identifier": f"{DOCUMENT_SYSTEM}|{row.get('doc_id')}"}):
+            document_total += 1
+    for row in charts:
+        chart_id = str(row.get("id") or "")
+        fields = ((row.get("metadata") or {}).get("fields") or {})
+        if fields.get("notes") and repo.client.search_one(
+            "DocumentReference",
+            {"identifier": f"{DOCUMENT_SYSTEM}|seed:{chart_id}:source-note"},
+        ):
+            document_total += 1
+    thread_total = sum(
+        1
+        for row in sessions
+        if repo.thread_by_zep(str(row.get("zep_thread_id") or ""))
+    )
+    print(
+        f"Imported/reconciled {len(charts)} patients, {fact_count} facts, "
+        f"{expected_documents} documents, and {dicom_count} DICOM studies "
+        f"({dicom_instance_count} instance metadata records)."
+    )
     print(
         "Reconciliation counts — "
         f"source/Medplum: patients {len(charts)}/{patient_total}, "
-        f"documents {len(documents)}/{document_total}, threads {len(sessions)}/{thread_total}."
+        f"documents {expected_documents}/{document_total}, threads {len(sessions)}/{thread_total}."
     )
 
 

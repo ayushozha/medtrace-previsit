@@ -1,6 +1,6 @@
 import { Suspense, lazy } from 'react';
 import { Loader2 } from 'lucide-react';
-import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AppNav } from './components/AppNav';
 import { LandingPage } from './components/LandingPage';
 import { MainDashboard } from './components/MainDashboard';
@@ -35,6 +35,22 @@ function PatientDirectoryRoute() {
   return <MainDashboard onSelectPatient={(id) => navigate(`/patients/${id}`)} />;
 }
 
+function PatientImagingRoute() {
+  const { patientId } = useParams<{ patientId: string }>();
+  if (!patientId) return <Navigate to="/patients" replace />;
+  return <ImagingWorkspace patientId={patientId} />;
+}
+
+function PatientSessionRoute() {
+  const { patientId } = useParams<{ patientId: string }>();
+  if (!patientId) return <Navigate to="/patients" replace />;
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <SessionWorkspace patientId={patientId} />
+    </Suspense>
+  );
+}
+
 export default function App() {
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -51,15 +67,11 @@ export default function App() {
               </Suspense>
             }
           />
-          <Route path="/imaging" element={<ImagingWorkspace />} />
-          <Route
-            path="/session"
-            element={
-              <Suspense fallback={<RouteFallback />}>
-                <SessionWorkspace />
-              </Suspense>
-            }
-          />
+          <Route path="/patients/:patientId/imaging" element={<PatientImagingRoute />} />
+          <Route path="/patients/:patientId/session" element={<PatientSessionRoute />} />
+          {/* Legacy top-level routes — imaging/session require a patient context. */}
+          <Route path="/imaging" element={<Navigate to="/patients" replace />} />
+          <Route path="/session" element={<Navigate to="/patients" replace />} />
           <Route
             path="/yc-medplum-hackathon-demo"
             element={

@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-DocumentKind = Literal["clinical_pdf", "radiology_note", "conversation_note"]
+DocumentKind = Literal["clinical_pdf", "radiology_note", "conversation_note", "dicom"]
 RiskLevel = Literal["High", "Medium", "Low"]
 LabStatus = Literal["High", "Normal", "Low", "Borderline"]
 TrendDirection = Literal["Worsening", "Improving", "Stable"]
@@ -50,6 +50,38 @@ class CreatePatientIn(BaseModel):
     primary_doctor: str | None = None
     notes: str | None = None
     tags: list[str] = Field(default_factory=list)
+
+
+class UpdatePatientIn(BaseModel):
+    """Partial canonical Patient update; omitted fields are preserved."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    dob: str | None = None
+    sex: Literal["M", "F", "O"] | None = None
+    primary_doctor: str | None = None
+
+
+class ConsultationIn(BaseModel):
+    """Canonical voice-session payload received from the transcription service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    consultation_id: str = Field(min_length=1, max_length=128)
+    transcript: str = Field(default="", max_length=200_000)
+    report: str = Field(default="", max_length=200_000)
+    duration: str | None = Field(default=None, max_length=32)
+    recorded_at: str | None = None
+    audio_base64: str | None = None
+    audio_content_type: str = Field(default="audio/wav", max_length=128)
+
+
+class ConsultationOut(BaseModel):
+    consultation_id: str
+    patient_id: str
+    encounter_id: str
+    document_ids: dict[str, str] = Field(default_factory=dict)
 
 
 class DocumentOut(BaseModel):
@@ -112,6 +144,21 @@ class SendMessageOut(BaseModel):
 class TimelineEvent(BaseModel):
     date: str
     events: list[str]
+
+
+class ChecklistItemOut(BaseModel):
+    id: str
+    text: str
+    done: bool = False
+    agent_note: str | None = None
+
+
+class UpdateChecklistItemIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=1_000)
+    done: bool
+    agent_note: str | None = Field(default=None, max_length=500)
 
 
 class LabTrendOut(BaseModel):
@@ -192,6 +239,7 @@ class ClinicalSnapshotOut(BaseModel):
     timeline: list[TimelineEvent] = Field(default_factory=list)
     documents: list[DocumentOut] = Field(default_factory=list)
     doctor_checklist: list[str] = Field(default_factory=list)
+    doctor_checklist_items: list[ChecklistItemOut] = Field(default_factory=list)
 
 
 # ---- YC Medplum hackathon demo ---------------------------------------------
@@ -363,6 +411,17 @@ class DemoReadinessOut(BaseModel):
 # ---- Imaging (DICOM studies, segmentation, draft reports) --------------------
 
 ReportSource = Literal["mock", "medgemma", "fireworks-vl", "qwen-vl"]
+ReviewDecision = Literal["unreviewed", "accepted", "needs-correction"]
+
+
+class ReportOut(BaseModel):
+    summary: str
+    findings: str
+    impression: str
+    recommendation: str
+    confidence: float
+    source: ReportSource
+    fhir_diagnostic_report_id: str | None = None
 
 
 class RoiPrompt(BaseModel):
@@ -384,6 +443,9 @@ class RoiPrompt(BaseModel):
 
 class StudyOut(BaseModel):
     id: str
+    patient_id: str
+    fhir_imaging_study_id: str
+    fhir_document_reference_id: str | None = None
     patient_name: str = "Uploaded Study"
     patient_detail: str = "DICOM metadata pending"
     modality: str = "DICOM"
@@ -402,6 +464,10 @@ class StudyOut(BaseModel):
     #: True when the series carries ImagePositionPatient/Orientation/PixelSpacing on every
     #: slice — the precondition for building a volume and reslicing it (MPR).
     has_volume_geometry: bool = False
+    uploaded_at: str | None = None
+    review_decision: ReviewDecision = "unreviewed"
+    review_note: str | None = None
+    report: ReportOut | None = None
 
 
 class SegmentationRequest(BaseModel):
@@ -437,10 +503,15 @@ class ReportRequest(BaseModel):
     segmentations: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class ReportOut(BaseModel):
-    summary: str
-    findings: str
-    impression: str
-    recommendation: str
-    confidence: float
-    source: ReportSource
+class ReportReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accepted", "needs-correction"]
+    note: str | None = Field(default=None, max_length=2_000)
+
+
+class ReportReviewOut(BaseModel):
+    decision: Literal["accepted", "needs-correction"]
+    note: str | None = None
+    fhir_diagnostic_report_id: str
+    fhir_task_id: str

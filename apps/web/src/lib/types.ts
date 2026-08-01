@@ -1,6 +1,6 @@
 // Types mirror apps/api/schemas.py.
 
-export type DocumentKind = 'clinical_pdf' | 'radiology_note' | 'conversation_note';
+export type DocumentKind = 'clinical_pdf' | 'radiology_note' | 'conversation_note' | 'dicom';
 export type RiskLevel = 'High' | 'Medium' | 'Low';
 export type LabStatus = 'High' | 'Normal' | 'Low' | 'Borderline';
 export type TrendDirection = 'Worsening' | 'Improving' | 'Stable';
@@ -33,6 +33,13 @@ export interface CreatePatientPayload {
   primary_doctor?: string;
   notes?: string;
   tags?: string[];
+}
+
+export interface UpdatePatientPayload {
+  display_name?: string;
+  dob?: string | null;
+  sex?: 'M' | 'F' | 'O';
+  primary_doctor?: string | null;
 }
 
 export interface DocumentRecord {
@@ -157,6 +164,14 @@ export interface ClinicalSnapshot {
   timeline: TimelinePeriod[];
   documents: DocumentRecord[];
   doctor_checklist: string[];
+  doctor_checklist_items: ChecklistItemRecord[];
+}
+
+export interface ChecklistItemRecord {
+  id: string;
+  text: string;
+  done: boolean;
+  agent_note?: string | null;
 }
 
 // ---- Imaging (apps/api/routers/studies.py) ----
@@ -206,11 +221,15 @@ export interface DraftReport {
   recommendation: string;
   confidence: number;
   source: ReportSource;
+  fhir_diagnostic_report_id?: string | null;
 }
 
 /** Server payload from `POST /api/studies`. */
 export interface StudyUpload {
   id: string;
+  patient_id: string;
+  fhir_imaging_study_id: string;
+  fhir_document_reference_id?: string | null;
   patient_name: string;
   patient_detail: string;
   modality: string;
@@ -227,6 +246,10 @@ export interface StudyUpload {
   slice_urls?: string[];
   /** True when every slice carries position/orientation/spacing — the precondition for MPR. */
   has_volume_geometry?: boolean;
+  uploaded_at?: string | null;
+  review_decision?: ReviewDecision;
+  review_note?: string | null;
+  report?: DraftReport | null;
 }
 
 /** Client-side study: the server payload plus local review state. */

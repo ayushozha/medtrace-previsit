@@ -17,17 +17,23 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
     derived AI-memory/knowledge projection and Fireworks AI supplies LLM/VLM
     calls. Clinical routes need backend-only Medplum client credentials; Zep
     outages do not block canonical dashboard reads or lose documents/messages.
-  - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Fireworks VL).
-    **Runs in mock mode without `FIREWORKS_API_KEY`** — still fine for UI demos.
+  - *Imaging*: patient-linked DICOM upload, MedSAM2 segmentation, and draft reports
+    (Fireworks VL). Medplum owns `ImagingStudy`, representative patient-scoped
+    DICOM `Binary`/`DocumentReference`, `DiagnosticReport`, and review `Task`
+    resources; the complete series stays in the local demo viewer store. Model
+    inference runs in mock mode without `FIREWORKS_API_KEY`.
 - **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app with
-  `/` (landing), `/patients` + `/patients/:id` (dashboard), `/imaging`,
-  `/session` (voice, lazy-loaded), and `/yc-medplum-hackathon-demo`.
-- **`services/transcription/`** — prototype backing `/session` and optional
-  patient-chart CopilotKit checklist collab: LangGraph (8010) + CopilotKit
-  Express (4000). Started with `npm run dev:transcription`; STT/TTS via
-  **Deepgram** (`DEEPGRAM_API_KEY`), report + dashboard agents via `OPENAI_*`
-  (can point at Fireworks). Session agent `predictive_state_updates`; dashboard
-  agent `dashboard_clinical`.
+  `/` (landing), `/patients` + `/patients/:id` (chart), patient-scoped
+  `/patients/:id/imaging` and `/patients/:id/session` (voice, lazy-loaded),
+  and `/yc-medplum-hackathon-demo`.
+- **`services/transcription/`** — prototype backing `/patients/:id/session` and
+  the patient-chart CopilotKit co-pilot: LangGraph (8010) + CopilotKit Express
+  (4000). Started with `npm run dev:transcription`; STT/TTS via **Deepgram**
+  (`DEEPGRAM_API_KEY`), agents via `OPENAI_*` (can point at Fireworks). Session
+  agent `predictive_state_updates`. Chart chat uses auto-router `chart_router`
+  (specialists: `dashboard_clinical` UI updates, `clinical_memory` Zep/FHIR Q&A;
+  research/critic agents can plug in later). Document upload stays on the chart
+  (Memory Sources), not inside CopilotChat.
 
 Depth references: `README.md` (Medplum/Zep flows), `CLAUDE.md` (architecture +
 gotchas), `DBMS-design.md` (canonical FHIR model).
@@ -80,6 +86,7 @@ Prefer the root `package.json` scripts over re-deriving commands.
 | `npm run dev:web` | Vite only | 3000 |
 | `npm run dev:transcription` | transcription backend + CopilotKit runtime | 8010, 4000 |
 | `npm run medplum:up` | Medplum server + admin app; internal Postgres/Redis | 8103, 3002 |
+| `npm run medplum:export-sqlite` | Portable SQLite dump of patient charts for sharing | writes `data/exports/patients.sqlite` |
 
 Running the backend manually:
 
@@ -120,7 +127,7 @@ Running the backend manually:
 | `medplum_extraction.py` | Validated typed facts for unverified FHIR resource creation. |
 | `ingest/documents.py`, `ingest/scan_extract.py` | PDF → text (VLM page images or `pypdf`), `chunk_for_zep` → `graph.add(type="text")`. |
 | `ontology/clinical.py` | Clinical entity/edge ontology; `auto_apply_clinical_ontology` runs at API startup. |
-| `imaging/` | `storage.py` (study paths), `dicom.py` (preview render), `model_adapters/` (MedSAM2 + report). |
+| `imaging/` | `storage.py` (study paths), `dicom.py` (preview render), `fhir.py` (DICOM → ImagingStudy), `model_adapters/` (MedSAM2 + report). |
 | `integrations/pubmed.py` | NCBI E-utilities (`esearch`/`esummary` JSON, not scraping). |
 | `synthetic_fixtures.py` | Neutral committed fixtures and historical JSON import boundary. |
 | `fireworks_config.py` | `fireworks_chat_client(...)` — the single `ChatOpenAI` construction point. |
@@ -128,9 +135,10 @@ Running the backend manually:
 | `patient_json.py`, `tracing.py` | Demo fixtures + `derive_age`/`derive_primary_doctor`; Langtrace/LangSmith init. |
 
 **Clinical ownership (central concept):** Medplum owns patients, structured
-facts, source files, and transcripts. `zep_user_id` and `zep_thread_id` survive
-as stable FHIR identifiers. Zep holds only a derived semantic projection, with
-retry work represented as durable Medplum `Task` resources.
+facts, source files, imaging metadata/reports, and transcripts. `zep_user_id`
+and `zep_thread_id` survive as stable FHIR identifiers. Zep holds only a derived
+semantic projection, with retry work represented as durable Medplum `Task`
+resources.
 
 **Zep ontology is an AI-feature dependency, not a dashboard dependency.** `apps/api` applies it in its lifespan hook
 (`AUTO_APPLY_ZEP_ONTOLOGY=true` by default) for semantic agent tools. Ontology
@@ -150,8 +158,8 @@ model id, and key) — including a self-hosted vLLM server.
 
 Clinical routes always use the `medplum_*` routers. `GET /api/health` reports
 `medplum_configured`, `medplum_reachable`, and `zep_configured`. The browser
-never receives the client secret. Imaging routes are unchanged and never depend
-on clinical persistence.
+never receives the client secret. Imaging uploads require an existing canonical
+Patient and write Medplum before returning success; model inference remains optional.
 
 Dashboard reads batch `Condition`, `MedicationStatement`, `AllergyIntolerance`,
 `Observation`, `Encounter`, `DocumentReference`, `Provenance`, and `Task` and

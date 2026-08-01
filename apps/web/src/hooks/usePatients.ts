@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { apiGet, apiPost, ApiError } from '@/lib/api';
-import type { CreatePatientPayload, Patient } from '@/lib/types';
+import { apiGet, apiPatch, apiPost, ApiError } from '@/lib/api';
+import type { CreatePatientPayload, Patient, UpdatePatientPayload } from '@/lib/types';
 
 export interface UsePatientsResult {
   patients: Patient[];
@@ -8,6 +8,7 @@ export interface UsePatientsResult {
   error: string | null;
   refresh: () => Promise<void>;
   createPatient: (payload: CreatePatientPayload) => Promise<Patient>;
+  updatePatient: (patientId: string, payload: UpdatePatientPayload) => Promise<Patient>;
 }
 
 export function usePatients(): UsePatientsResult {
@@ -38,5 +39,11 @@ export function usePatients(): UsePatientsResult {
     return created;
   }, []);
 
-  return { patients, loading, error, refresh, createPatient };
+  const updatePatient = useCallback(async (patientId: string, payload: UpdatePatientPayload) => {
+    const updated = await apiPatch<Patient, UpdatePatientPayload>(`/api/patients/${patientId}`, payload);
+    setPatients((prev) => prev.map((patient) => (patient.id === updated.id ? updated : patient)));
+    return updated;
+  }, []);
+
+  return { patients, loading, error, refresh, createPatient, updatePatient };
 }

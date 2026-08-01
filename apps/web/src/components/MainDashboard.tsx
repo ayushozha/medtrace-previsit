@@ -38,6 +38,9 @@ export function MainDashboard({ onSelectPatient }: MainDashboardProps) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [displayName, setDisplayName] = useState('');
+  const [dob, setDob] = useState('');
+  const [sex, setSex] = useState<'M' | 'F' | 'O'>('O');
+  const [primaryDoctor, setPrimaryDoctor] = useState('');
 
   const openDialog = () => {
     setCreateError(null);
@@ -56,9 +59,19 @@ export function MainDashboard({ onSelectPatient }: MainDashboardProps) {
     setCreating(true);
     setCreateError(null);
     try {
-      const created = await createPatient({ zep_user_id: zepUserId, display_name: display });
+      const created = await createPatient({
+        zep_user_id: zepUserId,
+        display_name: display,
+        dob: dob || undefined,
+        sex,
+        primary_doctor: primaryDoctor.trim() || undefined,
+        tags: ['app-created'],
+      });
       setDialogOpen(false);
       setDisplayName('');
+      setDob('');
+      setSex('O');
+      setPrimaryDoctor('');
       onSelectPatient(created.id);
     } catch (err) {
       setCreateError((err as Error).message);
@@ -152,7 +165,7 @@ export function MainDashboard({ onSelectPatient }: MainDashboardProps) {
           <DialogHeader>
             <DialogTitle>Add new patient</DialogTitle>
             <DialogDescription>
-              Creates a chart and a Zep memory user for the patient.
+              Creates the canonical FHIR Patient in Medplum and a linked Zep memory user.
             </DialogDescription>
           </DialogHeader>
 
@@ -173,6 +186,50 @@ export function MainDashboard({ onSelectPatient }: MainDashboardProps) {
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="e.g. Jane Doe"
                 autoFocus
+                disabled={creating}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-1.5">
+                <label htmlFor="new-patient-dob" className="text-xs font-semibold text-slate-600">
+                  Date of birth
+                </label>
+                <Input
+                  id="new-patient-dob"
+                  type="date"
+                  value={dob}
+                  onChange={(e) => setDob(e.target.value)}
+                  disabled={creating}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <label htmlFor="new-patient-sex" className="text-xs font-semibold text-slate-600">
+                  Administrative gender
+                </label>
+                <select
+                  id="new-patient-sex"
+                  value={sex}
+                  onChange={(e) => setSex(e.target.value as 'M' | 'F' | 'O')}
+                  disabled={creating}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value="O">Unknown / other</option>
+                  <option value="F">Female</option>
+                  <option value="M">Male</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-1.5">
+              <label htmlFor="new-patient-doctor" className="text-xs font-semibold text-slate-600">
+                Primary clinician
+              </label>
+              <Input
+                id="new-patient-doctor"
+                value={primaryDoctor}
+                onChange={(e) => setPrimaryDoctor(e.target.value)}
+                placeholder="e.g. Dr. Maya Chen"
                 disabled={creating}
               />
             </div>

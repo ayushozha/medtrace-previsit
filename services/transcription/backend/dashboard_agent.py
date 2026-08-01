@@ -79,7 +79,9 @@ what that implies using the patient context and update the UI via update_dashboa
 
 Rules:
 - Non-diagnostic cognitive aid only. Do not claim certainty or replace clinical judgment.
-- Prefer short, actionable insights (1-3 cards max).
+- ALWAYS call update_dashboard_ui when answering — never reply with text only.
+- insights_json MUST be a JSON array with 1-3 objects: {{"id","title","body","relatedChecklistId"?}}.
+  Never pass an empty insights_json array when you have something useful to say.
 - When highlighting, set focus_type + focus_key to a real lab/condition/med/alert name from context.
 - Use checklist item ids from the list below when setting relatedChecklistId or notes.
 - After calling update_dashboard_ui, briefly tell the doctor what you changed (2 sentences max).

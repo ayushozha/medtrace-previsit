@@ -63,6 +63,7 @@ samples/dicom/*.zip
 *.sqlite3
 *.db-journal
 *.sqlite-journal
+services/transcription/backend/data/
 
 # Radiology API runtime uploads (DICOM studies + generated previews)
 data/studies/

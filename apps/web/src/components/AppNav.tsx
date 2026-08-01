@@ -1,17 +1,15 @@
-import { Mic, ScanLine, Sparkles, Stethoscope } from 'lucide-react';
+import { Sparkles, Stethoscope } from 'lucide-react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 
 const LINKS = [
-  { to: '/patients', label: 'Patients', icon: Stethoscope, end: true },
-  { to: '/imaging', label: 'Imaging', icon: ScanLine, end: false },
-  { to: '/session', label: 'Session', icon: Mic, end: false },
+  { to: '/patients', label: 'Patients', icon: Stethoscope, end: false },
   { to: '/yc-medplum-hackathon-demo', label: 'YC Demo', icon: Sparkles, end: false },
 ] as const;
 
 /**
- * Top-level product nav. These were three separate apps on three ports reached by
- * hyperlink; they are now routes in one app.
+ * Top-level product nav. Imaging and visit session live under a patient chart —
+ * doctors open a patient first, then choose a workspace for that chart.
  */
 export function AppNav() {
   const { pathname } = useLocation();
