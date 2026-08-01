@@ -4,7 +4,7 @@ Run::
 
     uvicorn apps.api.main:app --reload --port 8001
 
-Serves the clinical stack (Zep memory + graph, Fireworks, InsForge) and the imaging
+Serves the clinical stack (Medplum FHIR, Zep projection, Fireworks) and the imaging
 stack (DICOM upload, segmentation, draft reports) from one app.
 """
 
@@ -39,7 +39,14 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
-from apps.api.routers import clinical, demo, documents, patients, studies, threads  # noqa: E402
+from apps.api.routers import (  # noqa: E402
+    demo,
+    medplum_clinical,
+    medplum_documents,
+    medplum_patients,
+    medplum_threads,
+    studies,
+)
 from medtrace_agent.imaging.storage import data_dir  # noqa: E402
 from medtrace_agent.ontology import auto_apply_clinical_ontology  # noqa: E402
 
@@ -53,10 +60,8 @@ def _cors_origins() -> list[str]:
 async def lifespan(_app: FastAPI):
     """Register the clinical ontology with Zep before serving traffic.
 
-    ``routers/clinical.py`` searches the graph by the custom node labels and edge types
-    this defines, so without registration every clinical endpoint returns empty arrays
-    with a 200. Failures are logged, not raised — the imaging routes and health check
-    must still come up without Zep.
+    This supports optional Zep-powered AI tools. Canonical FHIR dashboard reads do not
+    depend on Zep, so failures are logged rather than blocking API startup.
     """
     auto_apply_clinical_ontology()
     yield
@@ -66,9 +71,8 @@ app = FastAPI(
     title="Medtrace API",
     version="0.2.0",
     description=(
-        "Clinical routes bridge the web frontend to Zep Cloud (memory + graph), "
-        "Fireworks AI (LLM + VLM) and InsForge (Postgres + Storage) in "
-        "single-demo-profile mode. Imaging routes handle DICOM upload, MedSAM2 "
+        "Clinical routes use Medplum FHIR R4 as the canonical store, with Zep as "
+        "an AI-memory projection and Fireworks AI for LLM/VLM calls. Imaging routes handle DICOM upload, MedSAM2 "
         "segmentation and draft reports."
     ),
     lifespan=lifespan,
@@ -85,28 +89,27 @@ app.add_middleware(
 
 @app.get("/api/health", tags=["meta"])
 def health() -> dict[str, object]:
-    """Liveness + sanity checks (does not call out to Zep / Fireworks)."""
-    from medtrace_agent.insforge_api import insforge_persistence_enabled
-    from medtrace_agent.local_store import local_mock_enabled
+    """Liveness + configuration sanity checks."""
+    from medtrace_agent.medplum import get_medplum_client, medplum_configured
+
+    configured = medplum_configured()
 
     return {
         "status": "ok",
-        "insforge_configured": insforge_persistence_enabled(),
-        "local_mock": local_mock_enabled(),
+        "clinical_backend": "medplum",
+        "medplum_configured": configured,
+        "medplum_reachable": get_medplum_client().reachable(),
         "fireworks_configured": bool(os.environ.get("FIREWORKS_API_KEY")),
         "zep_configured": bool(os.environ.get("ZEP_API_KEY")),
-        "demo_profile_id_set": bool(
-            os.environ.get("INSFORGE_PROFILE_ID") or local_mock_enabled()
-        ),
         # Which provider the imaging report route will use (mock when unconfigured).
         "imaging": studies.medgemma_service.status(),
     }
 
 
-app.include_router(patients.router)
-app.include_router(documents.router)
-app.include_router(threads.router)
-app.include_router(clinical.router)
+app.include_router(medplum_patients.router)
+app.include_router(medplum_documents.router)
+app.include_router(medplum_threads.router)
+app.include_router(medplum_clinical.router)
 app.include_router(studies.router)
 app.include_router(demo.router)
 

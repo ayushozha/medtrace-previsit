@@ -108,6 +108,11 @@ export function DocumentLibrary({ documents, patientId, onUploaded }: DocumentLi
                     <span>{doc.episode_count} facts extracted</span>
                     <span>{doc.status}</span>
                   </div>
+                  {doc.processing_error && (
+                    <p className="mt-1 truncate text-[10px] text-red-600" title={doc.processing_error}>
+                      {doc.processing_error}
+                    </p>
+                  )}
                 </div>
               </Wrapper>
             );

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -17,10 +18,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Security, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Security, UploadFile
 from fastapi.security import APIKeyHeader
 
-from apps.api.routers.patients import get_snapshot
+from apps.api.routers.medplum_patients import get_snapshot
 from apps.api.schemas import (
     DemoCheckinOut,
     DemoConfirmIn,
@@ -37,16 +38,6 @@ from medtrace_agent.agents.previsit import (
     create_previsit_draft,
     validate_evidence,
 )
-from medtrace_agent.ingest.documents import ingest_plain_text_note_to_patient_graph
-from medtrace_agent.insforge_api import (
-    documents_bucket,
-    fetch_documents_registry,
-    get_chart_subject,
-    insert_document_record,
-    remote_insforge_configured,
-    update_document_metadata,
-    upload_bytes_to_bucket,
-)
 from medtrace_agent.integrations.deepgram import (
     configuration_status as deepgram_status,
     transcribe_audio,
@@ -55,19 +46,16 @@ from medtrace_agent.integrations.medplum import (
     MedplumClient,
     configuration_status as medplum_status,
     patient_reference,
+    validate_synthetic_patient,
 )
 from medtrace_agent.integrations.moss_retrieval import (
     configuration_status as moss_status,
     retrieve_context,
 )
 from medtrace_agent.integrations.sponsor_error import SponsorIntegrationError
-from medtrace_agent.integrations.stedi import (
-    TEST_CASE_ID as STEDI_TEST_CASE_ID,
-    check_eligibility,
-    configuration_status as stedi_status,
-)
-from medtrace_agent.local_store import local_mock_enabled
-from medtrace_agent.zep.graph import list_recent_episodes
+from medtrace_agent.integrations.stedi import check_eligibility, configuration_status as stedi_status
+from medtrace_agent.medplum import MedplumError
+from medtrace_agent.medplum_repository import CODE_SYSTEM, TAG_SYSTEM, repository
 
 router = APIRouter(prefix="/api/demo", tags=["yc-medplum-demo"])
 
@@ -77,6 +65,7 @@ _ELIGIBILITY_IDENTIFIER_SYSTEM = (
     "https://github.com/ayushozha/medtrace-previsit/stedi-eligibility"
 )
 _OPERATOR_IDENTIFIER_SYSTEM = "https://github.com/ayushozha/medtrace-previsit/operators"
+_CHECKIN_JOURNAL_TAG = "yc-demo-checkin"
 _CHECKIN_TOKEN_TTL_SECONDS = 2 * 60 * 60
 _DEMO_TOKEN_HEADER = "X-MedTrace-Demo-Token"
 _SPONSOR_RATE_LIMIT = 8
@@ -122,8 +111,6 @@ def _workflow_status() -> dict[str, object]:
         missing.append("YC_DEMO_OPERATOR_ID")
     if not operator_name:
         missing.append("YC_DEMO_OPERATOR_NAME")
-    if not (os.environ.get("ZEP_API_KEY") or "").strip():
-        missing.append("ZEP_API_KEY")
     return {"configured": not missing, "missing": missing}
 
 
@@ -162,23 +149,10 @@ def _enforce_sponsor_rate_limit(operator: DemoOperator) -> None:
         calls.append(now)
 
 
-def _require_real_data_layer(
+async def _require_real_data_layer(
     patient_id: str,
     _operator: Annotated[DemoOperator, Depends(_require_demo_operator)],
 ) -> dict[str, Any]:
-    if local_mock_enabled():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "The hackathon route does not use MEDTRACE_LOCAL_MOCK. Configure the real "
-                "InsForge database and select a synthetic demo patient."
-            ),
-        )
-    if not remote_insforge_configured():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Real InsForge persistence is required for the hackathon route.",
-        )
     configured_patient_id = (os.environ.get("YC_DEMO_PATIENT_ID") or "").strip()
     if not configured_patient_id:
         raise HTTPException(status_code=503, detail="YC_DEMO_PATIENT_ID is required.")
@@ -190,40 +164,11 @@ def _require_real_data_layer(
             status_code=503,
             detail=f"Demo workflow configuration is incomplete: {', '.join(workflow['missing'])}.",
         )
-    chart = get_chart_subject(chart_subject_id=patient_id)
-    if not chart:
-        raise HTTPException(status_code=404, detail="Synthetic demo patient not found.")
-    metadata = chart.get("metadata") if isinstance(chart.get("metadata"), dict) else {}
-    fields = metadata.get("fields") if isinstance(metadata.get("fields"), dict) else {}
-    tags = metadata.get("tags") or fields.get("tags") or []
-    binding = metadata.get("yc_medplum_demo")
-    if (
-        "synthetic" not in {str(tag).strip().lower() for tag in tags if tag}
-        or not isinstance(binding, dict)
-        or binding.get("synthetic") is not True
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="The configured chart is not marked as an approved synthetic demo patient.",
-        )
-    medplum_patient_id = (os.environ.get("MEDPLUM_PATIENT_ID") or "").strip()
-    if not medplum_patient_id or not hmac.compare_digest(
-        str(binding.get("medplum_patient_id") or ""), medplum_patient_id
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="The InsForge chart is not bound to the configured Medplum synthetic patient.",
-        )
-    if (
-        binding.get("stedi_test_case") != STEDI_TEST_CASE_ID
-        or str(chart.get("display_name") or "").strip() != "Jane Doe"
-        or str(fields.get("dob") or "").strip() != "2004-04-04"
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="The chart is not bound to the documented Stedi Aetna Jane Doe test persona.",
-        )
-    return chart
+    try:
+        patient = await MedplumClient().assert_synthetic_patient(patient_id)
+    except SponsorIntegrationError as exc:
+        _raise_sponsor(exc)
+    return repository().patient_view(patient)
 
 
 DemoOperatorDep = Annotated[DemoOperator, Depends(_require_demo_operator)]
@@ -251,19 +196,23 @@ def _raise_sponsor(exc: SponsorIntegrationError) -> None:
 
 @router.get("/status", response_model=DemoStatusOut)
 def demo_status() -> DemoStatusOut:
-    if local_mock_enabled():
-        data_mode = "local-mock"
-    elif remote_insforge_configured():
-        data_mode = "remote"
-    else:
-        data_mode = "unconfigured"
+    medplum = medplum_status()
+    patient_id = (os.environ.get("YC_DEMO_PATIENT_ID") or "").strip()
+    safe_patient_id: str | None = None
+    if patient_id and medplum["configured"]:
+        try:
+            patient = repository().get_patient(patient_id)
+            if patient:
+                validate_synthetic_patient(patient, patient_id)
+                safe_patient_id = patient_id
+        except (MedplumError, SponsorIntegrationError):
+            logger.warning("Configured YC demo Patient failed the synthetic safety check.")
     return DemoStatusOut(
-        demo_patient_id=(os.environ.get("YC_DEMO_PATIENT_ID") or "").strip() or None,
-        data_mode=data_mode,  # type: ignore[arg-type]
+        demo_patient_id=safe_patient_id,
         deepgram=_provider_status(deepgram_status()),
         moss=_provider_status(moss_status()),
         openai=_provider_status(openai_status()),
-        medplum=_provider_status(medplum_status()),
+        medplum=_provider_status(medplum),
         stedi=_provider_status(stedi_status()),
         workflow=_provider_status(_workflow_status()),
     )
@@ -532,6 +481,10 @@ def _checkin_identifier(checkin_id: str, suffix: str) -> dict[str, str]:
     return {"system": _CHECKIN_IDENTIFIER_SYSTEM, "value": f"{checkin_id}:{suffix}"}
 
 
+def _resource_urn(checkin_id: str, suffix: str) -> str:
+    return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'{_CHECKIN_IDENTIFIER_SYSTEM}:{checkin_id}:{suffix}')}"
+
+
 def _conditional_identifier(resource: dict[str, Any]) -> str:
     raw = resource.get("identifier")
     identifier = raw[0] if isinstance(raw, list) and raw else raw
@@ -595,12 +548,17 @@ def _operator_reference(operator: DemoOperator) -> dict[str, Any]:
 
 
 def _fhir_resources(
-    payload: DemoConfirmIn, operator: DemoOperator
+    patient_id: str,
+    payload: DemoConfirmIn,
+    operator: DemoOperator,
+    note_text: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     now = datetime.now(timezone.utc).isoformat()
-    patient = patient_reference()
-    encounter_urn = f"urn:uuid:{uuid.uuid4()}"
+    patient = patient_reference(patient_id)
+    encounter_urn = _resource_urn(payload.checkin_id, "encounter")
+    journal_urn = _resource_urn(payload.checkin_id, "reconstruction")
     reconstruction = {
+        "yc_demo_checkin": True,
         "checkin_id": payload.checkin_id,
         "deepgram_request_id": payload.deepgram_request_id,
         "openai_response_id": payload.openai_response_id,
@@ -611,6 +569,8 @@ def _fhir_resources(
         "draft": payload.draft.model_dump(mode="json"),
         "review_audit": _review_audit(payload),
         "approved_at": now,
+        "workflow_state": "approval_recorded",
+        "validation_status": "pending",
     }
     resources: list[tuple[str, dict[str, Any]]] = [
         (
@@ -625,13 +585,14 @@ def _fhir_resources(
                     "display": "ambulatory",
                 },
                 "serviceType": {"text": "AI-assisted pre-visit check-in"},
+                "type": [{"text": "AI-assisted pre-visit check-in"}],
                 "subject": {"reference": patient},
                 "period": {"start": now, "end": now},
                 "reasonCode": [{"text": "Clinician-reviewed pre-visit check-in"}],
             },
         ),
         (
-            f"urn:uuid:{uuid.uuid4()}",
+            _resource_urn(payload.checkin_id, "questionnaire-response"),
             {
                 "resourceType": "QuestionnaireResponse",
                 "identifier": _checkin_identifier(payload.checkin_id, "questionnaire-response"),
@@ -658,10 +619,15 @@ def _fhir_resources(
             },
         ),
         (
-            f"urn:uuid:{uuid.uuid4()}",
+            journal_urn,
             {
                 "resourceType": "DocumentReference",
                 "identifier": [_checkin_identifier(payload.checkin_id, "reconstruction")],
+                "meta": {
+                    "tag": [
+                        {"system": TAG_SYSTEM, "code": _CHECKIN_JOURNAL_TAG}
+                    ]
+                },
                 "status": "current",
                 "type": {"text": "Clinician-approved pre-visit reconstruction"},
                 "subject": {"reference": patient},
@@ -679,6 +645,30 @@ def _fhir_resources(
                         }
                     }
                 ],
+            },
+        ),
+        (
+            _resource_urn(payload.checkin_id, "zep-projection"),
+            {
+                "resourceType": "Task",
+                "identifier": [_checkin_identifier(payload.checkin_id, "zep-projection")],
+                "status": "requested",
+                "intent": "order",
+                "code": {
+                    "coding": [
+                        {
+                            "system": CODE_SYSTEM,
+                            "code": "zep-demo-projection",
+                            "display": "zep-demo-projection",
+                        }
+                    ],
+                    "text": "zep-demo-projection",
+                },
+                "focus": {"reference": journal_urn},
+                "for": {"reference": patient},
+                "authoredOn": now,
+                "lastModified": now,
+                "input": [{"type": {"text": "note-text"}, "valueString": note_text}],
             },
         ),
     ]
@@ -736,7 +726,7 @@ def _fhir_resources(
                 "reasonCode": [{"text": change.proposed_value}],
                 "note": common["note"],
             }
-        resources.append((f"urn:uuid:{uuid.uuid4()}", resource))
+        resources.append((_resource_urn(payload.checkin_id, f"change-{index + 1}"), resource))
     return resources
 
 
@@ -777,16 +767,59 @@ def _find_checkin_document(
     *,
     completed_only: bool = False,
 ) -> dict[str, Any] | None:
+    params: dict[str, Any] = {
+        "subject": f"Patient/{patient_id}",
+        "_count": 100,
+        "_sort": "-date",
+    }
+    if checkin_id:
+        params["identifier"] = (
+            f"{_CHECKIN_IDENTIFIER_SYSTEM}|{checkin_id}:reconstruction"
+        )
+    try:
+        documents = repository().client.search("DocumentReference", params)
+    except MedplumError as exc:
+        raise HTTPException(
+            status_code=503 if exc.status_code in {401, 403} else 502,
+            detail=f"Medplum workflow journal read failed: {exc}",
+        ) from exc
+
     matches: list[dict[str, Any]] = []
-    for row in fetch_documents_registry(chart_subject_id=patient_id):
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for resource in documents:
+        subject = resource.get("subject") if isinstance(resource.get("subject"), dict) else {}
+        tags = (resource.get("meta") or {}).get("tag") or []
+        identifiers = resource.get("identifier") or []
+        if subject.get("reference") != f"Patient/{patient_id}" or not any(
+            isinstance(tag, dict)
+            and tag.get("system") == TAG_SYSTEM
+            and tag.get("code") == _CHECKIN_JOURNAL_TAG
+            for tag in tags
+        ):
+            continue
+        if checkin_id and not any(
+            isinstance(identifier, dict)
+            and identifier.get("system") == _CHECKIN_IDENTIFIER_SYSTEM
+            and identifier.get("value") == f"{checkin_id}:reconstruction"
+            for identifier in identifiers
+        ):
+            continue
+        metadata = _decode_document_json(resource)
         if not metadata.get("yc_demo_checkin"):
             continue
         if checkin_id and str(metadata.get("checkin_id")) != checkin_id:
             continue
         if completed_only and metadata.get("workflow_state") != "complete":
             continue
-        matches.append(row)
+        matches.append(
+            {
+                "doc_id": str(resource.get("id") or ""),
+                "uploaded_at": str(
+                    resource.get("date") or (resource.get("meta") or {}).get("lastUpdated") or ""
+                ),
+                "metadata": metadata,
+                "_resource": resource,
+            }
+        )
     return max(
         matches,
         key=lambda row: str(
@@ -796,6 +829,71 @@ def _find_checkin_document(
         ),
         default=None,
     )
+
+
+def _decode_document_json(resource: dict[str, Any]) -> dict[str, Any]:
+    for content in resource.get("content") or []:
+        attachment = content.get("attachment") if isinstance(content, dict) else None
+        if not isinstance(attachment, dict) or attachment.get("contentType") != "application/json":
+            continue
+        encoded = attachment.get("data")
+        if not isinstance(encoded, str):
+            continue
+        try:
+            decoded = json.loads(base64.b64decode(encoded, validate=True))
+        except (binascii.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=502, detail="The Medplum workflow journal is unreadable.") from exc
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
+
+
+def _update_document_metadata(
+    patient_id: str,
+    checkin_id: str,
+    metadata_patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    row = _find_checkin_document(patient_id, checkin_id)
+    if not row:
+        return None
+    resource = row.get("_resource")
+    if not isinstance(resource, dict):
+        return None
+    metadata = dict(row.get("metadata") or {})
+    metadata.update(metadata_patch)
+    retained = []
+    for content in resource.get("content") or []:
+        attachment = content.get("attachment") if isinstance(content, dict) else None
+        if not isinstance(attachment, dict) or attachment.get("contentType") != "application/json":
+            retained.append(content)
+    updated = {
+        **resource,
+        "content": [
+            {
+                "attachment": {
+                    "contentType": "application/json",
+                    "title": f"Pre-visit reconstruction {checkin_id}",
+                    "data": base64.b64encode(
+                        json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+                    ).decode("ascii"),
+                }
+            },
+            *retained,
+        ],
+    }
+    try:
+        saved = repository().client.update(updated)
+    except MedplumError as exc:
+        raise HTTPException(
+            status_code=503 if exc.status_code in {401, 403} else 502,
+            detail=f"Medplum workflow journal update failed: {exc}",
+        ) from exc
+    return {
+        "doc_id": str(saved.get("id") or ""),
+        "uploaded_at": str(saved.get("date") or (saved.get("meta") or {}).get("lastUpdated") or ""),
+        "metadata": metadata,
+        "_resource": saved,
+    }
 
 
 def _completed_metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -836,17 +934,7 @@ def _saved_confirmation(
         validations=metadata.get("validations") or [],
         resources=metadata.get("medplum_resources") or [],
         document_id=str(row.get("doc_id") or payload.checkin_id),
-        episode_ids=metadata.get("episode_ids") or [],
     )
-
-
-def _find_zep_checkin_episodes(user_id: str, checkin_id: str) -> list[str]:
-    marker = f"doc_id={checkin_id} "
-    return [
-        str(row.get("uuid"))
-        for row in list_recent_episodes(user_id, lastn=100, truncate_chars=None)
-        if row.get("uuid") and marker in str(row.get("content") or "")
-    ]
 
 
 @router.post(
@@ -859,6 +947,7 @@ async def confirm_checkin(
     operator: DemoOperatorDep,
     chart: DemoChartDep,
 ) -> DemoConfirmOut:
+    del chart
     _enforce_sponsor_rate_limit(operator)
     if not payload.approved:
         raise HTTPException(status_code=409, detail="No FHIR write occurs until the clinician approves.")
@@ -870,14 +959,15 @@ async def confirm_checkin(
         _raise_sponsor(exc)
 
     note_text = _note_text(payload, operator)
-    note_bytes = note_text.encode("utf-8")
-    filename = f"previsit-{payload.checkin_id}.txt"
     existing = await asyncio.to_thread(_find_checkin_document, patient_id, payload.checkin_id)
     if existing:
         metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        review_audit = metadata.get("review_audit") if isinstance(metadata.get("review_audit"), dict) else {}
         if (
             metadata.get("draft") != payload.draft.model_dump(mode="json")
             or str(metadata.get("operator_id") or "") != operator.operator_id
+            or str(review_audit.get("source_draft_sha256") or "")
+            != _json_digest(payload.source_draft.model_dump(mode="json"))
         ):
             raise HTTPException(
                 status_code=409,
@@ -886,47 +976,7 @@ async def confirm_checkin(
         if metadata.get("workflow_state") == "complete":
             return _saved_confirmation(existing, payload, operator)
     else:
-        try:
-            upload = await asyncio.to_thread(
-                upload_bytes_to_bucket, note_bytes, filename, content_type="text/plain"
-            )
-            metadata = {
-                "yc_demo_checkin": True,
-                "checkin_id": payload.checkin_id,
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-                "operator_id": operator.operator_id,
-                "clinician_name": operator.display_name,
-                "deepgram_request_id": payload.deepgram_request_id,
-                "openai_response_id": payload.openai_response_id,
-                "patient_speaker": payload.patient_speaker,
-                "draft": payload.draft.model_dump(mode="json"),
-                "review_audit": _review_audit(payload),
-                "evidence_utterances": _approved_utterances(payload),
-                "workflow_state": "approval_recorded",
-            }
-            existing = await asyncio.to_thread(
-                insert_document_record,
-                doc_id=payload.checkin_id,
-                filename=filename,
-                document_kind="conversation_note",
-                storage_bucket=str(upload.get("bucket") or documents_bucket()),
-                storage_key=str(upload.get("key") or ""),
-                storage_url=str(upload.get("url") or "") or None,
-                chart_subject_id=patient_id,
-                extract_mode="deepgram_moss_openai_medplum",
-                episode_count=0,
-                metadata=metadata,
-            )
-            if not existing:
-                raise RuntimeError("InsForge did not return the approval journal record.")
-        except Exception as exc:
-            logger.exception("Failed to persist approval journal checkin_id=%s", payload.checkin_id)
-            raise HTTPException(
-                status_code=502,
-                detail="The approval journal could not be saved; no Medplum write was attempted.",
-            ) from exc
-
-    metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else metadata
+        metadata = {}
     validations = metadata.get("validations") if isinstance(metadata.get("validations"), list) else []
     resources = (
         metadata.get("medplum_resources")
@@ -935,7 +985,7 @@ async def confirm_checkin(
     )
     if not resources:
         try:
-            fhir_pairs = _fhir_resources(payload, operator)
+            fhir_pairs = _fhir_resources(patient_id, payload, operator, note_text)
             fhir_resources = [resource for _, resource in fhir_pairs]
             medplum = MedplumClient()
             await medplum.assert_synthetic_patient(patient_id)
@@ -955,80 +1005,39 @@ async def confirm_checkin(
             resources = await medplum.transact(entries, checkin_id=payload.checkin_id)
         except SponsorIntegrationError as exc:
             _raise_sponsor(exc)
-        saved = await asyncio.to_thread(
-            update_document_metadata,
-            doc_id=payload.checkin_id,
-            metadata_patch={
-                "validation_status": "passed",
-                "validations": validations,
-                "medplum_resources": resources,
-                "workflow_state": "medplum_committed",
-            },
-        )
-        if not saved:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Medplum committed the conditional FHIR transaction, but the InsForge workflow "
-                    "journal could not be updated. Retry with the same check-in ID."
-                ),
-            )
-        existing = saved
-
-    zep_user_id = str(chart.get("zep_user_id") or "")
-    episode_ids = await asyncio.to_thread(
-        _find_zep_checkin_episodes, zep_user_id, payload.checkin_id
+    completed = await asyncio.to_thread(
+        _update_document_metadata,
+        patient_id,
+        payload.checkin_id,
+        {
+            "validation_status": "passed",
+            "validations": validations,
+            "medplum_resources": resources,
+            "zep_projection_status": "requested",
+            "workflow_state": "complete",
+        },
     )
-    if not episode_ids:
-        try:
-            episode_ids = await asyncio.to_thread(
-                ingest_plain_text_note_to_patient_graph,
-                zep_user_id,
-                note_text,
-                note_source="session_note",
-                filename=filename,
-                doc_id=payload.checkin_id,
-                extra_metadata={"checkin_id": payload.checkin_id, "medplum_validated": True},
-            )
-        except Exception as exc:
-            logger.exception("Zep reconstruction ingest failed checkin_id=%s", payload.checkin_id)
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Medplum is committed and the approval journal is durable, but Zep chart refresh "
-                    "failed. Retry with the same check-in ID."
-                ),
-            ) from exc
-
-    try:
-        completed = await asyncio.to_thread(
-            update_document_metadata,
-            doc_id=payload.checkin_id,
-            metadata_patch={"episode_ids": episode_ids, "workflow_state": "complete"},
-        )
-        if not completed:
-            raise RuntimeError("InsForge did not persist the completed workflow state.")
-    except Exception as exc:
-        logger.exception("Failed to finalize workflow journal checkin_id=%s", payload.checkin_id)
+    if not completed:
         raise HTTPException(
             status_code=502,
             detail=(
-                "Medplum and Zep succeeded, but the workflow journal could not be finalized. "
-                "Retry with the same check-in ID."
+                "Medplum committed the conditional FHIR transaction, but its workflow journal "
+                "could not be finalized. Retry with the same check-in ID."
             ),
-        ) from exc
+        )
     return DemoConfirmOut(
         checkin_id=payload.checkin_id,
         approved=True,
         validation_status="passed",
         validations=validations,
         resources=resources,
-        document_id=payload.checkin_id,
-        episode_ids=episode_ids,
+        document_id=str(completed.get("doc_id") or ""),
     )
 
 
-def _eligibility_document(checkin_id: str, result: dict[str, Any]) -> dict[str, Any]:
+def _eligibility_document(
+    patient_id: str, checkin_id: str, result: dict[str, Any]
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     retained = {
         key: result.get(key)
@@ -1046,9 +1055,10 @@ def _eligibility_document(checkin_id: str, result: dict[str, Any]) -> dict[str, 
     return {
         "resourceType": "DocumentReference",
         "identifier": [{"system": _ELIGIBILITY_IDENTIFIER_SYSTEM, "value": checkin_id}],
+        "meta": {"tag": [{"system": TAG_SYSTEM, "code": "yc-demo-eligibility"}]},
         "status": "current",
         "type": {"text": "Stedi test-mode eligibility response"},
-        "subject": {"reference": patient_reference()},
+        "subject": {"reference": patient_reference(patient_id)},
         "date": now,
         "author": [{"display": "Stedi test mode"}],
         "content": [
@@ -1063,6 +1073,35 @@ def _eligibility_document(checkin_id: str, result: dict[str, Any]) -> dict[str, 
             }
         ],
     }
+
+
+def _find_eligibility_document(patient_id: str, checkin_id: str) -> dict[str, Any] | None:
+    try:
+        rows = repository().client.search(
+            "DocumentReference",
+            {
+                "subject": f"Patient/{patient_id}",
+                "identifier": f"{_ELIGIBILITY_IDENTIFIER_SYSTEM}|{checkin_id}",
+                "_count": 2,
+            },
+        )
+    except MedplumError as exc:
+        raise HTTPException(
+            status_code=503 if exc.status_code in {401, 403} else 502,
+            detail=f"Medplum eligibility read failed: {exc}",
+        ) from exc
+    for resource in rows:
+        subject = resource.get("subject") if isinstance(resource.get("subject"), dict) else {}
+        if subject.get("reference") != f"Patient/{patient_id}":
+            continue
+        if any(
+            isinstance(identifier, dict)
+            and identifier.get("system") == _ELIGIBILITY_IDENTIFIER_SYSTEM
+            and identifier.get("value") == checkin_id
+            for identifier in resource.get("identifier") or []
+        ):
+            return resource
+    return None
 
 
 @router.post(
@@ -1086,53 +1125,70 @@ async def eligibility(
         return DemoEligibilityOut(checkin_id=payload.checkin_id, **saved_eligibility)
     pending = metadata.get("eligibility_pending")
     result = pending if isinstance(pending, dict) else None
+    existing_resource = await asyncio.to_thread(
+        _find_eligibility_document, patient_id, payload.checkin_id
+    )
+    resource: dict[str, Any] | None = None
+    if existing_resource:
+        stored = _decode_document_json(existing_resource)
+        if stored:
+            result = stored
+            resource = MedplumClient.resource_result(
+                existing_resource, checkin_id=payload.checkin_id
+            )
     try:
         if result is None:
             result = await check_eligibility()
             saved_pending = await asyncio.to_thread(
-                update_document_metadata,
-                doc_id=payload.checkin_id,
-                metadata_patch={"eligibility_pending": result},
+                _update_document_metadata,
+                patient_id,
+                payload.checkin_id,
+                {"eligibility_pending": result},
             )
             if not saved_pending:
                 raise SponsorIntegrationError(
                     "workflow",
                     "Stedi completed, but the resumable eligibility journal could not be saved.",
                 )
-        fhir_document = _eligibility_document(payload.checkin_id, result)
-        medplum = MedplumClient()
-        await medplum.assert_synthetic_patient(patient_id)
-        await medplum.validate_resources([fhir_document])
-        resource = (
-            await medplum.transact(
-                [
-                    {
-                        "fullUrl": f"urn:uuid:{uuid.uuid4()}",
-                        "resource": fhir_document,
-                        "request": {
-                            "method": "POST",
-                            "url": "DocumentReference",
-                            "ifNoneExist": (
-                                f"identifier={_ELIGIBILITY_IDENTIFIER_SYSTEM}|{payload.checkin_id}"
-                            ),
-                        },
-                    }
-                ],
-                checkin_id=payload.checkin_id,
-            )
-        )[0]
+        if resource is None:
+            fhir_document = _eligibility_document(patient_id, payload.checkin_id, result)
+            medplum = MedplumClient()
+            await medplum.assert_synthetic_patient(patient_id)
+            await medplum.validate_resources([fhir_document])
+            resource = (
+                await medplum.transact(
+                    [
+                        {
+                            "fullUrl": _resource_urn(payload.checkin_id, "eligibility"),
+                            "resource": fhir_document,
+                            "request": {
+                                "method": "POST",
+                                "url": "DocumentReference",
+                                "ifNoneExist": (
+                                    f"identifier={_ELIGIBILITY_IDENTIFIER_SYSTEM}|{payload.checkin_id}"
+                                ),
+                            },
+                        }
+                    ],
+                    checkin_id=payload.checkin_id,
+                )
+            )[0]
     except SponsorIntegrationError as exc:
         _raise_sponsor(exc)
     saved = await asyncio.to_thread(
-        update_document_metadata,
-        doc_id=payload.checkin_id,
-        metadata_patch={
+        _update_document_metadata,
+        patient_id,
+        payload.checkin_id,
+        {
             "eligibility": {**result, "medplum_resource": resource},
             "eligibility_pending": None,
         },
     )
     if not saved:
-        raise HTTPException(status_code=502, detail="Eligibility succeeded but InsForge reconstruction update failed.")
+        raise HTTPException(
+            status_code=502,
+            detail="Eligibility succeeded but the Medplum reconstruction update failed.",
+        )
     return DemoEligibilityOut(
         checkin_id=payload.checkin_id,
         **result,

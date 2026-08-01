@@ -39,6 +39,7 @@ JSON shape (all keys required; use null or [] where appropriate):
   "dates": [<strings>],
   "labs": [{"name": null, "value": null, "unit": null, "ref_range": null, "flag": null}],
   "medications": [<strings>],
+  "allergies": [<strings>],
   "diagnoses_or_impressions": [<strings>],
   "imaging_or_figure_notes": [<brief factual notes about visible figures, or empty>],
   "illegible_fields": [<short descriptions of unreadable regions>],
@@ -66,6 +67,7 @@ class PageVLMExtract(BaseModel):
     dates: list[str] = Field(default_factory=list)
     labs: list[LabRow] = Field(default_factory=list)
     medications: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
     diagnoses_or_impressions: list[str] = Field(default_factory=list)
     imaging_or_figure_notes: list[str] = Field(default_factory=list)
     illegible_fields: list[str] = Field(default_factory=list)
@@ -247,9 +249,25 @@ def pdf_bytes_via_vlm(
     max_pages: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> str:
-    """
-    Full pipeline: PDF bytes → PNG per page → VLM extract each page → single ingest string.
-    """
+    """Full pipeline returning the text representation used by Zep."""
+    pages_out, text = pdf_bytes_via_vlm_structured(
+        data,
+        dpi=dpi,
+        max_pages=max_pages,
+        progress_cb=progress_cb,
+    )
+    del pages_out
+    return text
+
+
+def pdf_bytes_via_vlm_structured(
+    data: bytes,
+    *,
+    dpi: int | None = None,
+    max_pages: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[list[PageVLMExtract], str]:
+    """Return validated page extracts and their traceable text serialization."""
     dpi_eff = dpi if dpi is not None else int(os.environ.get("PDF_VL_DPI", "150"))
     max_eff = max_pages if max_pages is not None else int(os.environ.get("PDF_VL_MAX_PAGES", "25"))
 
@@ -269,4 +287,4 @@ def pdf_bytes_via_vlm(
                 model=model,
             )
         )
-    return serialize_pages_for_ingest(pages_out)
+    return pages_out, serialize_pages_for_ingest(pages_out)

@@ -7,7 +7,6 @@ export interface ProviderStatus {
 
 export interface DemoStatus {
   demo_patient_id: string | null;
-  data_mode: 'remote' | 'local-mock' | 'unconfigured';
   deepgram: ProviderStatus;
   moss: ProviderStatus;
   openai: ProviderStatus;
@@ -89,7 +88,6 @@ export interface DemoConfirmation {
   validations: Array<{ resource_type: string; valid: true; notices: string[] }>;
   resources: FhirResource[];
   document_id: string;
-  episode_ids: string[];
 }
 
 export interface EligibilityBenefit {

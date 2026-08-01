@@ -1,17 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2, Mic, ShieldCheck, TriangleAlert } from 'lucide-react';
 
 import { DashboardHome } from '@/components/DashboardHome';
 import { PreVisitCheckinDialog } from '@/components/demo/PreVisitCheckinDialog';
 import { Button } from '@/components/ui/button';
-import { usePatients } from '@/hooks/usePatients';
 import { getDemoStatus, type DemoStatus } from '@/lib/demoApi';
 
 const FINAL_PROMPT =
   'What changed today, what should the clinician verify, and what evidence supports it?';
 
 export function YcMedplumHackathonDemo() {
-  const { patients, loading, error } = usePatients();
   const [status, setStatus] = useState<DemoStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -23,14 +21,9 @@ export function YcMedplumHackathonDemo() {
     return () => controller.abort();
   }, []);
 
-  const patientId = useMemo(() => {
-    if (!status?.demo_patient_id) return null;
-    return patients.some((patient) => patient.id === status.demo_patient_id)
-      ? status.demo_patient_id
-      : null;
-  }, [patients, status?.demo_patient_id]);
+  const patientId = status?.demo_patient_id ?? null;
 
-  if ((loading && patients.length === 0) || (!status && !statusError)) {
+  if (!status && !statusError) {
     return (
       <div className="grid min-h-[70vh] place-items-center text-sm text-slate-500">
         <Loader2 className="h-5 w-5 animate-spin" />
@@ -47,8 +40,8 @@ export function YcMedplumHackathonDemo() {
             <div>
               <h1 className="text-lg font-semibold text-slate-950">Demo patient is not available</h1>
               <p className="mt-2 text-sm leading-6 text-slate-600">
-                {error ?? statusError ??
-                  'Configure real InsForge credentials and YC_DEMO_PATIENT_ID for a synthetic patient.'}
+                {statusError ??
+                  'Configure Medplum and provision the tagged synthetic demo Patient.'}
               </p>
             </div>
           </div>

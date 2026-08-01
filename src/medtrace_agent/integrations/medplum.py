@@ -1,167 +1,132 @@
-"""Minimal Medplum OAuth, pre-write validation, and FHIR transaction client."""
+"""Demo safety checks and async helpers over the canonical Medplum client."""
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 import re
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
-import httpx
-
 from medtrace_agent.integrations.sponsor_error import SponsorIntegrationError
-
-_DEFAULT_BASE_URL = "https://api.medplum.com"
-SYNTHETIC_TAG_SYSTEM = "https://github.com/ayushozha/medtrace-previsit/tags"
-SYNTHETIC_TAG_CODE = "synthetic-demo"
-CHART_IDENTIFIER_SYSTEM = (
-    "https://github.com/ayushozha/medtrace-previsit/insforge-chart-subject-id"
+from medtrace_agent.integrations.stedi import TEST_CASE_ID
+from medtrace_agent.medplum import (
+    MedplumClient as FhirClient,
+    MedplumError,
+    get_medplum_client,
+    medplum_configured,
 )
+from medtrace_agent.medplum_repository import TAG_SYSTEM, ZEP_USER_SYSTEM, identifier_value
+
+
+SYNTHETIC_TAG_SYSTEM = TAG_SYSTEM
+SYNTHETIC_TAG_CODE = "synthetic"
+DEMO_TAG_CODE = "yc-medplum-demo"
+DEMO_STEDI_TAG_CODE = TEST_CASE_ID
+DEMO_ZEP_USER_ID = "yc-medplum-demo-jane-doe"
 _FHIR_ID = re.compile(r"[A-Za-z0-9\-.]{1,64}")
 
 
-def _official_base_url(value: str) -> bool:
-    parsed = urlparse(value)
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname == "api.medplum.com"
-        and parsed.username is None
-        and parsed.password is None
-        and port in {None, 443}
-        and not parsed.path.rstrip("/")
-        and not parsed.query
-        and not parsed.fragment
-    )
-
-
 def configuration_status() -> dict[str, object]:
-    required = ("MEDPLUM_CLIENT_ID", "MEDPLUM_CLIENT_SECRET", "MEDPLUM_PATIENT_ID")
+    required = (
+        "MEDPLUM_BASE_URL",
+        "MEDPLUM_CLIENT_ID",
+        "MEDPLUM_CLIENT_SECRET",
+        "YC_DEMO_PATIENT_ID",
+    )
     missing = [name for name in required if not (os.environ.get(name) or "").strip()]
-    base_url = (os.environ.get("MEDPLUM_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
-    if not _official_base_url(base_url):
-        missing.append("MEDPLUM_BASE_URL must use https://api.medplum.com")
-    patient_id = (os.environ.get("MEDPLUM_PATIENT_ID") or "").strip()
+    patient_id = (os.environ.get("YC_DEMO_PATIENT_ID") or "").strip()
     if patient_id and not _FHIR_ID.fullmatch(patient_id):
-        missing.append("MEDPLUM_PATIENT_ID must be a valid FHIR id")
-    return {"configured": not missing, "missing": missing}
+        missing.append("YC_DEMO_PATIENT_ID must be a valid FHIR id")
+    if not medplum_configured():
+        missing.extend(name for name in required[:3] if name not in missing)
+    return {"configured": not missing, "missing": list(dict.fromkeys(missing))}
 
 
-def _required(name: str) -> str:
-    value = (os.environ.get(name) or "").strip()
-    if not value:
+def patient_reference(patient_id: str | None = None) -> str:
+    configured = (os.environ.get("YC_DEMO_PATIENT_ID") or "").strip()
+    if not configured:
         raise SponsorIntegrationError(
-            "medplum", f"{name} is required for the real Medplum FHIR path.", status_code=503
+            "medplum", "YC_DEMO_PATIENT_ID is required for the synthetic demo.", status_code=503
         )
-    return value
-
-
-def patient_reference() -> str:
-    patient_id = _required("MEDPLUM_PATIENT_ID")
-    if not _FHIR_ID.fullmatch(patient_id):
+    if not _FHIR_ID.fullmatch(configured):
         raise SponsorIntegrationError(
-            "medplum", "MEDPLUM_PATIENT_ID must be a valid FHIR id.", status_code=503
+            "medplum", "YC_DEMO_PATIENT_ID must be a valid FHIR id.", status_code=503
         )
-    return f"Patient/{patient_id}"
+    if patient_id and not hmac.compare_digest(patient_id, configured):
+        raise SponsorIntegrationError(
+            "medplum", "The requested patient is not the configured synthetic demo patient.", status_code=404
+        )
+    return f"Patient/{configured}"
+
+
+def _display_name(patient: dict[str, Any]) -> str:
+    for name in patient.get("name") or []:
+        if not isinstance(name, dict):
+            continue
+        if name.get("text"):
+            return str(name["text"]).strip()
+        value = " ".join(
+            [*(str(item) for item in name.get("given") or []), str(name.get("family") or "")]
+        ).strip()
+        if value:
+            return value
+    return ""
+
+
+def _sponsor_error(exc: MedplumError, action: str) -> SponsorIntegrationError:
+    if exc.status_code in {401, 403}:
+        status_code = 503
+    elif exc.status_code in {404, 409, 422}:
+        status_code = exc.status_code
+    else:
+        status_code = 502
+    return SponsorIntegrationError("medplum", f"{action}: {exc}", status_code=status_code)
+
+
+def validate_synthetic_patient(
+    patient: dict[str, Any], patient_id: str
+) -> dict[str, Any]:
+    configured_id = patient_reference(patient_id).split("/", 1)[1]
+    if patient.get("resourceType") != "Patient" or patient.get("id") != configured_id:
+        raise SponsorIntegrationError(
+            "medplum", "Medplum returned an invalid Patient resource.", status_code=502
+        )
+    meta = patient.get("meta") if isinstance(patient.get("meta"), dict) else {}
+    tags = {
+        str(item.get("code") or "")
+        for item in meta.get("tag") or []
+        if isinstance(item, dict) and item.get("system") == SYNTHETIC_TAG_SYSTEM
+    }
+    required_tags = {SYNTHETIC_TAG_CODE, DEMO_TAG_CODE, DEMO_STEDI_TAG_CODE}
+    if (
+        not required_tags.issubset(tags)
+        or _display_name(patient) != "Jane Doe"
+        or str(patient.get("birthDate") or "") != "2004-04-04"
+        or identifier_value(patient, ZEP_USER_SYSTEM) != DEMO_ZEP_USER_ID
+    ):
+        raise SponsorIntegrationError(
+            "medplum",
+            "The configured Patient is not the approved synthetic Jane Doe demo persona.",
+            status_code=409,
+        )
+    return patient
 
 
 class MedplumClient:
-    def __init__(self) -> None:
-        self.base_url = (os.environ.get("MEDPLUM_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
-        if not _official_base_url(self.base_url):
-            raise SponsorIntegrationError(
-                "medplum",
-                "MEDPLUM_BASE_URL must use the hosted https://api.medplum.com sponsor endpoint.",
-                status_code=503,
-            )
-        try:
-            self.timeout = float(os.environ.get("MEDPLUM_TIMEOUT_SECONDS") or "45")
-        except ValueError as exc:
-            raise SponsorIntegrationError(
-                "medplum", "MEDPLUM_TIMEOUT_SECONDS must be numeric.", status_code=500
-            ) from exc
-        if self.timeout <= 0:
-            raise SponsorIntegrationError(
-                "medplum", "MEDPLUM_TIMEOUT_SECONDS must be positive.", status_code=500
-            )
+    """Non-blocking demo adapter that reuses the repository's OAuth/FHIR client."""
 
-    async def _token(self) -> str:
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/oauth2/token",
-                    data={
-                        "grant_type": "client_credentials",
-                        "client_id": _required("MEDPLUM_CLIENT_ID"),
-                        "client_secret": _required("MEDPLUM_CLIENT_SECRET"),
-                    },
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-        except httpx.HTTPError as exc:
-            raise SponsorIntegrationError("medplum", f"Medplum authentication failed: {exc}") from exc
-        if not response.is_success:
-            raise SponsorIntegrationError(
-                "medplum", f"Medplum authentication was rejected ({response.status_code})."
-            )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise SponsorIntegrationError("medplum", "Medplum returned unreadable OAuth output.") from exc
-        token = str(payload.get("access_token") or "") if isinstance(payload, dict) else ""
-        if not token:
-            raise SponsorIntegrationError("medplum", "Medplum returned no access token.")
-        return token
+    def __init__(self, client: FhirClient | None = None) -> None:
+        self.client = client or get_medplum_client()
 
-    async def assert_synthetic_patient(self, chart_subject_id: str) -> dict[str, Any]:
-        """Require an explicit two-way synthetic chart binding before any FHIR write."""
-        patient_id = patient_reference().split("/", 1)[1]
-        token = await self._token()
+    async def assert_synthetic_patient(self, patient_id: str) -> dict[str, Any]:
+        configured_id = patient_reference(patient_id).split("/", 1)[1]
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    f"{self.base_url}/fhir/R4/Patient/{patient_id}",
-                    headers={"Authorization": f"Bearer {token}", "Accept": "application/fhir+json"},
-                )
-        except httpx.HTTPError as exc:
-            raise SponsorIntegrationError(
-                "medplum", f"Medplum synthetic patient verification failed: {exc}"
-            ) from exc
-        if not response.is_success:
-            raise SponsorIntegrationError(
-                "medplum",
-                f"Medplum rejected synthetic patient verification ({response.status_code}).",
-            )
-        try:
-            patient = response.json()
-        except ValueError as exc:
-            raise SponsorIntegrationError(
-                "medplum", "Medplum returned an unreadable Patient resource."
-            ) from exc
-        if not isinstance(patient, dict) or patient.get("resourceType") != "Patient":
-            raise SponsorIntegrationError("medplum", "Medplum returned an invalid Patient resource.")
-        meta = patient.get("meta") if isinstance(patient.get("meta"), dict) else {}
-        tags = [item for item in meta.get("tag") or [] if isinstance(item, dict)]
-        identifiers = [item for item in patient.get("identifier") or [] if isinstance(item, dict)]
-        tagged = any(
-            item.get("system") == SYNTHETIC_TAG_SYSTEM and item.get("code") == SYNTHETIC_TAG_CODE
-            for item in tags
-        )
-        bound = any(
-            item.get("system") == CHART_IDENTIFIER_SYSTEM
-            and hmac.compare_digest(str(item.get("value") or ""), chart_subject_id)
-            for item in identifiers
-        )
-        if not tagged or not bound:
-            raise SponsorIntegrationError(
-                "medplum",
-                "The configured Patient lacks the required synthetic tag and InsForge chart binding.",
-                status_code=409,
-            )
-        return patient
+            patient = await asyncio.to_thread(self.client.read, "Patient", configured_id)
+        except MedplumError as exc:
+            raise _sponsor_error(exc, "Synthetic patient verification failed") from exc
+        return validate_synthetic_patient(patient, configured_id)
 
     @staticmethod
     def _validation_issues(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -172,104 +137,71 @@ class MedplumClient:
                 continue
             details = issue.get("details") if isinstance(issue.get("details"), dict) else {}
             detail = str(issue.get("diagnostics") or details.get("text") or "FHIR issue")
-            if issue.get("severity") in {"fatal", "error"}:
-                errors.append(detail)
-            else:
-                notices.append(detail)
+            (errors if issue.get("severity") in {"fatal", "error"} else notices).append(detail)
         return errors, notices
 
-    @classmethod
-    def _response_detail(cls, response: httpx.Response) -> str:
-        try:
-            payload = response.json()
-        except ValueError:
-            return ""
-        if not isinstance(payload, dict):
-            return ""
-        errors, notices = cls._validation_issues(payload)
-        detail = "; ".join((errors or notices)[:3])
-        return detail[:500]
-
     async def validate_resources(self, resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        token = await self._token()
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/fhir+json"}
         validations: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for resource in resources:
-                resource_type = str(resource.get("resourceType") or "")
-                if not resource_type:
-                    raise SponsorIntegrationError("medplum", "FHIR resourceType is missing.", status_code=500)
-                try:
-                    response = await client.post(
-                        f"{self.base_url}/fhir/R4/{resource_type}/$validate",
-                        headers=headers,
-                        json=resource,
-                    )
-                except httpx.HTTPError as exc:
-                    raise SponsorIntegrationError("medplum", f"Medplum validation failed: {exc}") from exc
-                if not response.is_success:
-                    detail = self._response_detail(response)
-                    raise SponsorIntegrationError(
-                        "medplum",
-                        f"Medplum rejected {resource_type} validation ({response.status_code})"
-                        f"{f': {detail}' if detail else '.'}",
-                    )
-                try:
-                    payload = response.json()
-                except ValueError as exc:
-                    raise SponsorIntegrationError(
-                        "medplum", f"Medplum returned unreadable {resource_type} validation output."
-                    ) from exc
-                if not isinstance(payload, dict):
-                    raise SponsorIntegrationError(
-                        "medplum", f"Medplum returned invalid {resource_type} validation output."
-                    )
-                if payload.get("resourceType") != "OperationOutcome":
-                    raise SponsorIntegrationError(
-                        "medplum",
-                        f"Medplum returned a non-OperationOutcome for {resource_type} validation.",
-                    )
-                errors, notices = self._validation_issues(payload)
-                if errors:
-                    raise SponsorIntegrationError(
-                        "medplum", f"{resource_type} did not validate: {'; '.join(errors)}", status_code=422
-                    )
-                validations.append({"resource_type": resource_type, "valid": True, "notices": notices})
+        for resource in resources:
+            resource_type = str(resource.get("resourceType") or "")
+            if not resource_type:
+                raise SponsorIntegrationError(
+                    "medplum", "FHIR resourceType is missing.", status_code=500
+                )
+            try:
+                payload = await asyncio.to_thread(self.client.validate, resource)
+            except MedplumError as exc:
+                raise _sponsor_error(exc, f"{resource_type} validation failed") from exc
+            if payload.get("resourceType") != "OperationOutcome":
+                raise SponsorIntegrationError(
+                    "medplum",
+                    f"Medplum returned a non-OperationOutcome for {resource_type} validation.",
+                )
+            errors, notices = self._validation_issues(payload)
+            if errors:
+                raise SponsorIntegrationError(
+                    "medplum",
+                    f"{resource_type} did not validate: {'; '.join(errors)}",
+                    status_code=422,
+                )
+            validations.append(
+                {"resource_type": resource_type, "valid": True, "notices": notices}
+            )
         return validations
+
+    @staticmethod
+    def resource_result(
+        resource: Mapping[str, Any], *, checkin_id: str, status: str = "200"
+    ) -> dict[str, str | None]:
+        resource_type = str(resource.get("resourceType") or "") or None
+        resource_id = str(resource.get("id") or "") or None
+        version_id = str((resource.get("meta") or {}).get("versionId") or "") or None
+        location = (
+            f"{resource_type}/{resource_id}"
+            f"{f'/_history/{version_id}' if version_id else ''}"
+            if resource_type and resource_id
+            else None
+        )
+        return {
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "version_id": version_id,
+            "location": location,
+            "status": status,
+            "checkin_id": checkin_id,
+        }
 
     async def transact(
         self, entries: list[dict[str, Any]], *, checkin_id: str
     ) -> list[dict[str, str | None]]:
-        token = await self._token()
-        bundle = {"resourceType": "Bundle", "type": "transaction", "entry": entries}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/fhir/R4",
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/fhir+json"},
-                    json=bundle,
-                )
-        except httpx.HTTPError as exc:
-            raise SponsorIntegrationError("medplum", f"Medplum transaction failed: {exc}") from exc
-        if not response.is_success:
-            detail = self._response_detail(response)
+            payload = await asyncio.to_thread(self.client.transaction, entries)
+        except MedplumError as exc:
+            raise _sponsor_error(exc, "FHIR transaction failed") from exc
+        if payload.get("resourceType") != "Bundle" or payload.get("type") != "transaction-response":
             raise SponsorIntegrationError(
-                "medplum",
-                f"Medplum rejected the FHIR transaction ({response.status_code})"
-                f"{f': {detail}' if detail else '.'}",
+                "medplum", "Medplum returned an unexpected transaction response."
             )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise SponsorIntegrationError(
-                "medplum", "Medplum returned an unreadable transaction response."
-            ) from exc
-        if (
-            not isinstance(payload, dict)
-            or payload.get("resourceType") != "Bundle"
-            or payload.get("type") != "transaction-response"
-        ):
-            raise SponsorIntegrationError("medplum", "Medplum returned an unexpected transaction response.")
         response_entries = payload.get("entry")
         if not isinstance(response_entries, list) or len(response_entries) != len(entries):
             raise SponsorIntegrationError(
@@ -278,29 +210,25 @@ class MedplumClient:
             )
         resources: list[dict[str, str | None]] = []
         for entry in response_entries:
-            if not isinstance(entry, dict):
-                raise SponsorIntegrationError("medplum", "Medplum returned an invalid transaction entry.")
-            item = entry.get("response") if isinstance(entry.get("response"), dict) else {}
+            item = entry.get("response") if isinstance(entry, dict) and isinstance(entry.get("response"), dict) else {}
             status = str(item.get("status") or "")
             if not status.startswith("2"):
                 raise SponsorIntegrationError("medplum", f"A Medplum FHIR write failed ({status}).")
             location = str(item.get("location") or "")
-            path = urlparse(location).path.rstrip("/")
-            match = re.search(r"([^/]+)/([^/]+)(?:/_history/([^/]+))?$", path)
-            if match:
-                resource_type, resource_id, version_id = match.groups()
-            else:
-                resource_type = resource_id = version_id = None
-            if not resource_type or not resource_id:
+            match = re.search(
+                r"([^/]+)/([^/]+)(?:/_history/([^/]+))?$", urlparse(location).path.rstrip("/")
+            )
+            if not match:
                 raise SponsorIntegrationError(
                     "medplum", "A successful Medplum write returned no resource location or ID."
                 )
+            resource_type, resource_id, version_id = match.groups()
             resources.append(
                 {
                     "resource_type": resource_type,
                     "resource_id": resource_id,
                     "version_id": version_id,
-                    "location": location or None,
+                    "location": location,
                     "status": status,
                     "checkin_id": checkin_id,
                 }
@@ -309,23 +237,8 @@ class MedplumClient:
 
     async def create_validated(self, resource: dict[str, Any]) -> dict[str, str | None]:
         await self.validate_resources([resource])
-        token = await self._token()
-        resource_type = str(resource["resourceType"])
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/fhir/R4/{resource_type}",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/fhir+json"},
-                json=resource,
-            )
-        if not response.is_success:
-            raise SponsorIntegrationError(
-                "medplum", f"Medplum rejected {resource_type} creation ({response.status_code})."
-            )
-        payload = response.json()
-        return {
-            "resource_type": resource_type,
-            "resource_id": str(payload.get("id") or "") or None,
-            "version_id": str((payload.get("meta") or {}).get("versionId") or "") or None,
-            "location": None,
-            "status": str(response.status_code),
-        }
+        try:
+            created = await asyncio.to_thread(self.client.create, resource)
+        except MedplumError as exc:
+            raise _sponsor_error(exc, f"{resource.get('resourceType')} creation failed") from exc
+        return self.resource_result(created, checkin_id="", status="201")

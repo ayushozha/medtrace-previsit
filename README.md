@@ -13,10 +13,10 @@ One FastAPI service and one React app, sharing the `src/medtrace_agent/` Python 
 | Surface | Path | Port |
 |---------|------|------|
 | API (clinical + imaging) | `apps/api/` (`apps.api.main:app`) | 8001 |
-| Web app | `apps/web/` — `/`, `/patients/:id`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
+| Web app | `apps/web/` — `/`, `/patients/:patientId`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
 | Voice prototype | `services/transcription/` (optional; backs `/session`) | 8010 + 4000 |
 
-- **Clinical** — patients, documents, chat threads, and derived views over **Zep Cloud** (memory + temporal graph), **Fireworks AI** (LLM + VLM), and **InsForge** (Postgres + Storage). Needs keys, or set `MEDTRACE_LOCAL_MOCK=1` for an offline file-backed data layer.
+- **Clinical** — **Medplum FHIR R4 is the only clinical store** for patients, clinical facts, source documents, and transcripts. **Zep Cloud** is a permanent derived AI-memory/knowledge projection; **Fireworks AI** supplies LLM/VLM calls.
 - **Imaging** — DICOM upload, MedSAM2 segmentation, draft reports. **Runs fully in mock mode with no secrets** — easiest path to an end-to-end demo.
 
 **Topics:** clinical AI · pre-visit intake · evidence provenance · FHIR R4 · eligibility and benefits · human-in-the-loop review
@@ -57,7 +57,12 @@ npm install
 npm --prefix apps/web ci
 
 Copy-Item .env.example .env
-# Fill ZEP / FIREWORKS / INSFORGE keys, or set MEDTRACE_LOCAL_MOCK=1 for an offline dashboard.
+# Start Medplum, create a project + ClientApplication at http://localhost:3002,
+# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
+
+npm run medplum:up
+npm run medplum:bootstrap
+npm run medplum:seed
 
 npm run dev          # api :8001, web :3000
 ```
@@ -73,18 +78,24 @@ npm install
 npm --prefix apps/web ci
 
 cp .env.example .env
-# Fill ZEP / FIREWORKS / INSFORGE keys, or set MEDTRACE_LOCAL_MOCK=1 for an offline dashboard.
+# Start Medplum, create a project + ClientApplication at http://localhost:3002,
+# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
 # Imaging works without secrets (deterministic mock).
 
+npm run medplum:up
+npm run medplum:bootstrap
+npm run medplum:seed
 npm run dev          # api :8001, web :3000
 ```
 
 | Script | Starts |
 |--------|--------|
-| `npm run dev` | api + web |
+| `npm run dev` | api + web + Medplum→Zep projection worker |
 | `npm run dev:api` | FastAPI only |
 | `npm run dev:web` | Vite only |
 | `npm run dev:transcription` | voice backend (8010) + CopilotKit runtime (4000) |
+| `npm run medplum:up` / `medplum:down` / `medplum:logs` | pinned local Medplum stack |
+| `npm run medplum:bootstrap` / `medplum:seed` | verify credentials / idempotently import synthetic fixtures |
 | `npm run lint` / `npm run build` | TypeScript check / Vite build (`apps/web`) |
 | `npm run test:py` | `python -m pytest -m "not integration"` in the activated venv |
 
@@ -121,25 +132,20 @@ The intended storyboard targets **2:45** and must stop before **3:00**. This is 
 
 The route has no application-generated sponsor fallback. Missing credentials fail visibly. Stedi itself returns Stedi-generated synthetic test data and does not contact a payer. Use synthetic data only: Moss currently lists HIPAA support on Enterprise.
 
-### Provision the one cross-provider synthetic patient
+### Provision the one canonical synthetic patient
 
-The demo deliberately refuses an arbitrary InsForge chart. The selected chart must be Jane Doe (`2004-04-04`), carry the `synthetic` tag, bind to the exact Medplum Patient ID, and identify Stedi test case `aetna-jane-doe-20040404`. The reciprocal Medplum Patient must carry:
+The demo deliberately refuses an arbitrary FHIR Patient. `YC_DEMO_PATIENT_ID` is the canonical Medplum `Patient.id`, and that resource must be Jane Doe (`2004-04-04`) with all three tags under the repository's `TAG_SYSTEM` (default `https://medtrace.local/fhir/tag`): `synthetic`, `yc-medplum-demo`, and `aetna-jane-doe-20040404`. It must also carry the stable Zep projection identifier `yc-medplum-demo-jane-doe`.
 
-- `meta.tag`: system `https://github.com/ayushozha/medtrace-previsit/tags`, code `synthetic-demo`;
-- `identifier`: system `https://github.com/ayushozha/medtrace-previsit/insforge-chart-subject-id`, value equal to the InsForge chart ID.
-
-After configuring real InsForge, Zep, and Medplum ClientApplication credentials, provision the existing rich synthetic chronic-care fixture and its crosswalk:
+Use an isolated, synthetic-only Medplum project and a least-privilege ClientApplication, then provision the longitudinal FHIR chart idempotently:
 
 ```powershell
-# Creates a new explicitly tagged Medplum Patient only when MEDPLUM_PATIENT_ID is blank.
-python scripts/provision_yc_demo_patient.py --create-medplum-patient
+python scripts/provision_yc_demo_patient.py
 
-# Copy the printed values into .env, then restart the API.
-# YC_DEMO_PATIENT_ID=<printed chart id>
-# MEDPLUM_PATIENT_ID=<printed FHIR id>
+# Copy the printed canonical FHIR ID into .env, then restart the API.
+# YC_DEMO_PATIENT_ID=<printed Patient.id>
 ```
 
-The script reuses the existing longitudinal chart fixture, writes the synthetic history to real Zep, persists the chart in real InsForge, creates or verifies the tagged Medplum Patient, and prints the exact IDs. It does not provision Stedi credentials.
+The script creates or reconciles the tagged Patient plus stable Condition, MedicationStatement, AllergyIntolerance, HbA1c Observation, and historical Encounter resources. Medplum remains canonical; Zep updates run as retryable Medplum `Task` projections through `npm run dev:zep-sync`. The script does not provision Stedi credentials.
 
 Generate the two workflow secrets separately; reusing them is rejected:
 
@@ -156,13 +162,13 @@ All patient-scoped operations require `X-MedTrace-Demo-Token`; `/api/demo/status
 
 | Method | Path | Purpose | Important failure behavior |
 |---|---|---|---|
-| `GET` | `/api/demo/status` | Presence-only provider/workflow configuration | Does not test provider connectivity |
-| `POST` | `/api/demo/patients/{id}/checkins` | Bounded audio → Deepgram → per-check-in Moss session → OpenAI reviewed draft | Rejects local mock, non-synthetic binding, invalid speaker selections or selections with no diarized utterances, recordings over 60 seconds, and missing providers |
-| `POST` | `/api/demo/patients/{id}/checkins/confirm` | Verify signed source evidence, journal approval, validate FHIR, commit one conditional transaction, refresh Zep | `approved=false` never builds/writes FHIR; retries reuse the check-in ID |
+| `GET` | `/api/demo/status` | Provider/workflow configuration plus safe demo-patient selection | Returns a Patient ID only after the exact synthetic persona passes its Medplum safety check |
+| `POST` | `/api/demo/patients/{id}/checkins` | Bounded audio → Deepgram → per-check-in Moss session → OpenAI reviewed draft | Rejects non-synthetic Patients, invalid speaker selections or selections with no diarized utterances, recordings over 60 seconds, and missing providers |
+| `POST` | `/api/demo/patients/{id}/checkins/confirm` | Verify signed source evidence, validate FHIR, atomically commit the journal and clinical resources, queue the Zep projection | `approved=false` never builds/writes FHIR; retries reuse the check-in ID |
 | `POST` | `/api/demo/patients/{id}/eligibility` | Run the exact Stedi test tuple and persist normalized benefit fields to Medplum | Requires a completed validated check-in; never stores the raw Stedi payload |
 | `GET` | `/api/demo/patients/{id}/readiness` | Reconstruct the completed clinician view | Rejects partial workflow journals |
 
-Audio is sent to Deepgram but is not persisted by this repository. OpenAI Responses is called with `store=False`. The full diarized transcript is displayed for review; only cited patient-speaker utterances, reviewed changes, provider IDs, validation results, and normalized Stedi fields are retained in InsForge/Zep/Medplum. Moss receives credentials/session creation through its control plane, uses a unique per-check-in local session, has telemetry disabled with `MOSS_DISABLE_TELEMETRY=1`, and is never pushed with `push_index()`.
+Audio is sent to Deepgram but is not persisted by this repository. OpenAI Responses is called with `store=False`. The full diarized transcript is displayed for review; only cited patient-speaker utterances, reviewed changes, provider IDs, validation results, and normalized Stedi fields are retained canonically in Medplum. A durable Medplum `Task` projects the approved note into Zep without blocking canonical readiness. Moss receives credentials/session creation through its control plane, uses a unique per-check-in local session, has telemetry disabled with `MOSS_DISABLE_TELEMETRY=1`, and is never pushed with `push_index()`.
 
 ### Cost language
 
@@ -182,13 +188,13 @@ apps/
   web/               React/Vite UI — dashboard, imaging, session (3000)
 services/
   transcription/     Voice/CopilotKit prototype (8010, 4000)
-src/medtrace_agent/  Shared package (Zep, ingest, agents, imaging, InsForge, ontology)
+src/medtrace_agent/  Shared package (Medplum, Zep, ingest, agents, imaging, ontology)
 tests/               Pytest suite (covers the shared package)
-migrations/          InsForge SQL migrations
-mock/patient_data/   Synthetic patient fixtures (local-mock seed source)
-data/                Runtime data (local_mock, notes, studies; mostly gitignored)
+infra/medplum/       Pinned local Medplum/PostgreSQL/Redis Compose stack
+mock/patient_data/   Synthetic Medplum seed fixtures
+data/                Runtime data and optional historical JSON imports (mostly gitignored)
 notebooks/           Colab workflows (MedGemma QLoRA training + evaluation)
-scripts/             Ontology apply, note ingest, seeding, local-mock reset, model probe
+scripts/             Medplum bootstrap/seed, projection worker, note ingest, model probe
 ```
 
 ---
@@ -205,30 +211,27 @@ flowchart LR
     AG[agents/rag_chat + deep_clinical]
     FW[Fireworks OpenAI-compatible API]
   end
-  subgraph zep [Zep Cloud]
-    TH[Thread API]
-    GR[Graph API]
+  subgraph canonical [Canonical clinical store]
+    MP[Medplum FHIR R4]
+    BIN[Binary storage]
   end
-  subgraph persist [Persistence]
-    IF[InsForge or local_store]
+  subgraph derived [Derived AI projection]
+    ZEP[Zep memory + knowledge graph]
   end
   WEB --> API
   API --> AG
   AG --> FW
-  API --> ZM[zep/memory.py]
-  API --> ZG[zep/graph.py]
-  API --> DOC[ingest/documents.py]
-  API --> IF
-  ZM --> TH
-  DOC --> GR
-  ZG --> GR
-  TH --> AG
+  API --> MP
+  MP --> BIN
+  MP --> WORKER[Task projection worker]
+  WORKER --> ZEP
+  ZEP --> AG
 ```
 
 - **Web** talks only to port 3000; Vite proxies `/api` and `/data` to the API, and `/api/copilotkit` to the transcription runtime.
 - **Agent** — default `chat_with_memory` (one LLM call with Zep context + document catalog). Optional Deep Agent (`deep` flag) uses Zep tools + PubMed.
-- **Zep** — conversational turns on **threads**; durable episodes/facts/ontology on the **user graph**.
-- **InsForge** — chart/document/session rows only. Clinical dashboard fields are derived per request from Zep (no SQL mirror). Local mock fakes InsForge via `data/local_mock/`.
+- **Medplum** — canonical `Patient`, clinical resources, `Binary` + `DocumentReference`, `Communication` transcripts, `Provenance`, and durable `Task` work.
+- **Zep** — subordinate semantic memory and knowledge projection. Dashboard reads and transcript ownership never depend on Zep availability.
 
 ### LLM layer
 
@@ -286,9 +289,11 @@ flowchart TB
   end
 
   subgraph persist [After each reply]
-    AT[append_turn]
-    LLM1 --> AT
-    LLM2 --> AT
+    COMM[Canonical Communication]
+    TASK[Projection Task]
+    COMM --> TASK
+    LLM1 --> COMM
+    LLM2 --> COMM
   end
 ```
 
@@ -308,21 +313,11 @@ Sample DICOM for uploads (ships with pydicom):
 .venv/bin/python -c "import pydicom.data,os;print(os.path.join(os.path.dirname(pydicom.data.__file__),'test_files','MR_small.dcm'))"
 ```
 
-### Local mock mode
+## Zep projection model
 
-`MEDTRACE_LOCAL_MOCK=1` runs the dashboard **without InsForge**:
+A Medplum `Patient` retains `zep_user_id` as a stable identifier. Canonical turns are child `Communication` resources under a header `Communication`; a durable `Task` projects completed turns and extracted document text into Zep.
 
-- Persistence routes to `local_store` (`data/local_mock/store.json`), auto-seeded from `mock/patient_data/`.
-- Reset with `scripts/reset_local_mock.py`.
-- **Chat and ingest still need Zep + Fireworks** — only the InsForge layer is faked.
-
----
-
-## Zep: thread vs graph
-
-A patient is a Zep **user** (`zep_user_id`).
-
-### Thread (short dialog + rolling context)
+### Zep thread mirror (short dialog + rolling context)
 
 - `thread.get_user_context(thread_id)` — synthesized context for the model.
 - `thread.get(thread_id, lastn=…)` — recent messages for LangChain history.
@@ -336,17 +331,17 @@ New thread = new conversation, same user (long-term recall stays attached to the
 - `graph.set_ontology` — clinical entity/edge types (`AUTO_APPLY_ZEP_ONTOLOGY=true` at API startup).
 - `graph.search` / episode + edge APIs — power derived clinical views and Deep Agent tools.
 
-**Ontology is a startup dependency.** If registration is skipped, clinical endpoints return empty arrays with 200. Re-apply with `scripts/apply_ontology.py`.
+The ontology supports optional Zep-powered AI tools. FHIR dashboard reads remain available if Zep or ontology registration is unavailable. Re-apply with `scripts/apply_ontology.py`.
 
 ---
 
 ## Chat turn sequence
 
-1. User sends a message in the web app.
-2. `fetch_thread_context(thread_id)` → Zep context string + last N messages.
-3. Document catalog is built from the InsForge / local-mock registry for that patient.
-4. **Default:** `chat_with_memory` — one LLM call. **Deep:** `run_clinical_deep_agent_turn` with tools + `MemorySaver`.
-5. `append_turn` writes both sides to Zep via `thread.add_messages`.
+1. React supplies a retry-safe `request_id`.
+2. The user turn is conditionally written to canonical Medplum `Communication` storage.
+3. The model receives the Medplum transcript and FHIR chart snapshot, supplemented by Zep context when available.
+4. The assistant turn is written to Medplum; a durable `Task` projects the turn into Zep.
+5. Generation failure leaves the user turn intact; retrying the same `request_id` does not duplicate it.
 
 ---
 
@@ -356,7 +351,7 @@ New thread = new conversation, same user (long-term recall stays attached to the
 
 **Skip VLM:** `pypdf` reads the embedded text layer only — faster, but no scans/handwriting.
 
-Then chunks go to Zep via `chunk_for_zep` → `graph.add(type="text")`.
+The source bytes are stored first as `Binary` plus patient-linked `DocumentReference`. Typed facts are written as unverified FHIR resources with `Provenance`; only afterward does a `Task` project text into Zep.
 
 ```mermaid
 flowchart TB
@@ -395,15 +390,17 @@ flowchart TB
 
 | Module | Role |
 |--------|------|
-| `apps/api/routers/threads.py` | Chat turn → fast or deep path, then `append_turn` |
-| `apps/api/routers/clinical.py` | Conditions, meds, labs, alerts, timeline from Zep |
+| `apps/api/routers/medplum_threads.py` | Canonical Communication transcript + Zep projection task |
+| `apps/api/routers/medplum_clinical.py` | Deterministic dashboard views from FHIR resources |
+| `apps/api/routers/medplum_documents.py` | Binary/DocumentReference-first extraction and Provenance |
 | `apps/api/routers/studies.py` | DICOM upload, segmentation, draft reports |
 | `medtrace_agent.agents.rag_chat` | `chat_with_memory` — single LLM call |
 | `medtrace_agent.agents.deep_clinical` | Deep Agent + Zep/PubMed tools |
 | `medtrace_agent.zep.memory` / `zep.graph` | Thread lifecycle + graph inspector |
 | `medtrace_agent.ingest.documents` / `scan_extract` | PDF/note → Zep graph |
 | `medtrace_agent.ontology.clinical` | Entity/edge ontology; auto-applied at startup |
-| `medtrace_agent.insforge_api` / `local_store` | InsForge registry + local-mock twin |
+| `medtrace_agent.medplum` / `medplum_repository` | OAuth/FHIR client + domain mapping |
+| `medtrace_agent.synthetic_fixtures` | neutral historical JSON and committed-fixture import boundary |
 | `medtrace_agent.fireworks_config` | Sole `ChatOpenAI` construction point |
 | `medtrace_agent.imaging.*` | Study paths, DICOM preview, MedSAM2 / report adapters |
 
@@ -417,7 +414,7 @@ See **`.env.example`** for every variable. Comments must be on their own lines �
 |------|-----------|
 | **LLM** | `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`, `FIREWORKS_VLM_API`, `FIREWORKS_REASONING_EFFORT` |
 | **Memory** | `ZEP_API_KEY`, `AUTO_APPLY_ZEP_ONTOLOGY` |
-| **Persistence** | `INSFORGE_URL`, `INSFORGE_ANON_KEY`, `INSFORGE_API_KEY`, `INSFORGE_PROFILE_ID` — or `MEDTRACE_LOCAL_MOCK=1` |
+| **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET` |
 | **PDF caps** | `PDF_VL_MAX_PAGES`, `PDF_VL_DPI` |
 | **PubMed** | `NCBI_EMAIL`, `NCBI_API_KEY` (optional) |
 | **Voice `/session`** | `GEMINI_API_KEY` (transcription); `OPENAI_*` for report agent / TTS (can point at Fireworks for chat) |
@@ -426,11 +423,11 @@ See **`.env.example`** for every variable. Comments must be on their own lines �
 | **Deepgram** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
 | **Moss** | `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `MOSS_INDEX_NAME`, `MOSS_MODEL_ID`, required `MOSS_DISABLE_TELEMETRY=1`; endpoint overrides must be unset |
 | **OpenAI demo extraction** | `OPENAI_API_KEY`, `OPENAI_MODEL`; leave `OPENAI_BASE_URL` empty for OpenAI |
-| **Medplum** | `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET`, `MEDPLUM_PATIENT_ID`, reciprocal synthetic tag/chart identifier |
+| **Medplum demo Patient** | `YC_DEMO_PATIENT_ID` plus the exact synthetic/demo/Stedi tags and Zep identifier created by the provisioner |
 | **Stedi test mode** | `STEDI_TEST_API_KEY` plus the exact documented Aetna/Jane Doe values already shown in `.env.example` |
 | **CORS** | `API_CORS_ORIGINS` (defaults include localhost:3000) |
 
-Clinical data routes return **503** without InsForge or local mock. Imaging routes never do (they degrade to mock). Chat/ingest fail without Fireworks + Zep even in local-mock mode.
+Clinical data routes return **503** until server-side Medplum client credentials are configured. Core patient, document, transcript, and dashboard storage remains available if Zep is down. Imaging routes are unchanged and degrade to deterministic mock.
 
 ---
 
@@ -485,11 +482,12 @@ Tests cover shared agent modules and focused demo-router orchestration. Live spo
 
 ## Security & hygiene
 
-- Never commit `.env` or secrets. `INSFORGE_API_KEY` is server-side only.
-- `data/` (studies, local mock, uploaded notes) is largely gitignored — do not commit real PHI. Fixtures in `mock/patient_data/` are synthetic.
+- Never commit `.env` or secrets. `MEDPLUM_CLIENT_SECRET` is server-side only.
+- `data/` (studies, historical imports, uploaded notes) is largely gitignored — do not commit real PHI. Fixtures in `mock/patient_data/` are synthetic.
 - Do not widen CORS to `*` for the main API.
-- The hackathon route rejects `MEDTRACE_LOCAL_MOCK=1`; sponsor credentials remain server-side. Only the dedicated, separately generated demo access token enters browser memory.
+- Sponsor and Medplum credentials remain server-side. Only the dedicated, separately generated demo access token enters browser memory.
 - `YC_DEMO_ACCESS_TOKEN` is a temporary hackathon operator gate, not production clinician authentication or RBAC. Replace it with authenticated clinician claims before any real deployment.
+- The generic clinical routes are not caller-authenticated; `RequireMedplumDep` checks configuration, not user identity. **Never connect this demo to a PHI-bearing Medplum project.** Use a least-privilege ClientApplication restricted to an isolated synthetic-only project.
 - Use only synthetic audio and patient/member data until appropriate BAAs, retention controls, and production agreements exist.
 - Agent output is non-diagnostic clinical decision support, not a medical device.
 

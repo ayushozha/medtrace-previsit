@@ -202,6 +202,7 @@ def run_clinical_deep_agent_turn(
     model_name: str,
     user_input: str,
     document_catalog: str | None,
+    canonical_context: str | None = None,
     checkpointer: MemorySaver,
 ) -> str:
     """
@@ -210,6 +211,14 @@ def run_clinical_deep_agent_turn(
     graph = get_compiled_clinical_agent(model_name, checkpointer)
 
     body = user_input.strip()
+    canonical = (canonical_context or "").strip()
+    if canonical:
+        body = (
+            "[Canonical FHIR chart snapshot — treat this as the clinical source of truth]\n"
+            + canonical
+            + "\n\n---\n\nUser message:\n"
+            + body
+        )
     cat = (document_catalog or "").strip()
     if cat:
         body = (

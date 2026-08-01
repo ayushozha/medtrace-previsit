@@ -1,6 +1,6 @@
 """Imaging routes: DICOM study upload, MedSAM2 segmentation, draft report generation.
 
-Independent of the clinical routes — no InsForge or Zep involvement. Studies are files
+Independent of the clinical routes — no Medplum or Zep involvement. Studies are files
 under ``data/studies/`` (see ``medtrace_agent.imaging.storage``), served at ``/data``.
 Every model call degrades to deterministic mock output when no provider is configured,
 so these routes work with no secrets at all.

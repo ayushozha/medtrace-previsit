@@ -67,8 +67,7 @@ data/local_mock/
 # Cursor (optional local rules; remove line if you want to commit .cursor rules)
 .cursor/
 
-# InsForge & AI agent skills
-.insforge
+# AI agent skills
 .agent
 .agents
 .augment

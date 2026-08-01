@@ -25,6 +25,15 @@ def clear_zep_lru_cache() -> None:
 
 
 @pytest.fixture(autouse=True)
+def clear_medplum_lru_cache() -> None:
+    from medtrace_agent.medplum import clear_medplum_client_cache
+
+    clear_medplum_client_cache()
+    yield
+    clear_medplum_client_cache()
+
+
+@pytest.fixture(autouse=True)
 def clear_deep_agent_graph_cache() -> None:
     from medtrace_agent.agents import deep_clinical
 

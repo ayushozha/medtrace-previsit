@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from typing import Any
@@ -14,6 +15,7 @@ from apps.api.schemas import DemoConfirmIn
 from medtrace_agent.agents.previsit import PrevisitDraft, ProposedChange, validate_evidence
 from medtrace_agent.integrations import deepgram, medplum, moss_retrieval, stedi
 from medtrace_agent.integrations.sponsor_error import SponsorIntegrationError
+from scripts import medplum_zep_worker, provision_yc_demo_patient
 
 
 def _utterance() -> dict[str, Any]:
@@ -84,12 +86,19 @@ def test_demo_auth_precedes_chart_access(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("YC_DEMO_OPERATOR_NAME", "Dr. Reviewer")
     data_layer_calls = 0
 
+    class FailIfCalled:
+        def __init__(self) -> None:
+            nonlocal data_layer_calls
+            data_layer_calls += 1
+            raise AssertionError("Unauthenticated traffic reached Medplum")
+
     def fail_if_called() -> bool:
         nonlocal data_layer_calls
         data_layer_calls += 1
         raise AssertionError("Unauthenticated traffic reached the data layer")
 
-    monkeypatch.setattr(demo, "remote_insforge_configured", fail_if_called)
+    monkeypatch.setattr(demo, "MedplumClient", FailIfCalled)
+    monkeypatch.setattr(demo, "repository", fail_if_called)
     test_app = FastAPI()
     test_app.include_router(demo.router)
 
@@ -207,27 +216,25 @@ def _install_journal_mocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def find(*_: Any, **__: Any) -> dict[str, Any] | None:
         return state.get("row")
 
-    def insert(**kwargs: Any) -> dict[str, Any]:
-        row = {"doc_id": kwargs["doc_id"], "metadata": dict(kwargs["metadata"])}
-        state["row"] = row
-        return row
-
-    def update(*, doc_id: str, metadata_patch: dict[str, Any]) -> dict[str, Any] | None:
+    def update(
+        patient_id: str, checkin_id: str, metadata_patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        assert patient_id == "chart-1"
         row = state.get("row")
-        if not row or row["doc_id"] != doc_id:
+        if not row or row["metadata"].get("checkin_id") != checkin_id:
             return None
         row["metadata"].update(metadata_patch)
         return row
 
     monkeypatch.setattr(demo, "_find_checkin_document", find)
-    monkeypatch.setattr(demo, "insert_document_record", insert)
-    monkeypatch.setattr(demo, "update_document_metadata", update)
+    monkeypatch.setattr(demo, "_update_document_metadata", update)
     return state
 
 
 def test_confirm_validates_before_medplum_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEDPLUM_PATIENT_ID", "patient-fhir-id")
+    monkeypatch.setenv("YC_DEMO_PATIENT_ID", "chart-1")
     events: list[str] = []
+    state = _install_journal_mocks(monkeypatch)
 
     class FakeMedplum:
         async def assert_synthetic_patient(self, chart_id: str) -> dict[str, Any]:
@@ -246,7 +253,7 @@ def test_confirm_validates_before_medplum_transaction(monkeypatch: pytest.Monkey
             self, entries: list[dict[str, Any]], *, checkin_id: str
         ) -> list[dict[str, Any]]:
             events.append("transact")
-            return [
+            results = [
                 {
                     "resource_type": entry["resource"]["resourceType"],
                     "resource_id": f"id-{index}",
@@ -257,17 +264,21 @@ def test_confirm_validates_before_medplum_transaction(monkeypatch: pytest.Monkey
                 }
                 for index, entry in enumerate(entries)
             ]
+            journal_index = next(
+                index
+                for index, entry in enumerate(entries)
+                if entry["resource"]["resourceType"] == "DocumentReference"
+            )
+            state["row"] = {
+                "doc_id": f"id-{journal_index}",
+                "metadata": demo._decode_document_json(  # noqa: SLF001
+                    entries[journal_index]["resource"]
+                ),
+            }
+            return results
 
     monkeypatch.setattr(demo, "MedplumClient", FakeMedplum)
     monkeypatch.setattr(demo, "_enforce_sponsor_rate_limit", lambda *_: None)
-    monkeypatch.setattr(
-        demo,
-        "upload_bytes_to_bucket",
-        lambda *_, **__: {"bucket": "test", "key": "checkin/note.txt", "url": None},
-    )
-    monkeypatch.setattr(demo, "_find_zep_checkin_episodes", lambda *_: [])
-    monkeypatch.setattr(demo, "ingest_plain_text_note_to_patient_graph", lambda *_, **__: ["episode-1"])
-    _install_journal_mocks(monkeypatch)
 
     payload = _confirm_payload(monkeypatch)
     result = asyncio.run(
@@ -278,6 +289,7 @@ def test_confirm_validates_before_medplum_transaction(monkeypatch: pytest.Monkey
     assert events == ["patient", "validate", "transact"]
     assert result.validation_status == "passed"
     assert result.resources
+    assert result.document_id.startswith("id-")
 
 
 def test_confirm_retry_returns_saved_reconstruction_without_another_fhir_write(
@@ -302,7 +314,6 @@ def test_confirm_retry_returns_saved_reconstruction_without_another_fhir_write(
                     "status": "200",
                 }
             ],
-            "episode_ids": ["episode-1"],
         },
     }
     monkeypatch.setattr(demo, "_find_checkin_document", lambda *_, **__: row)
@@ -319,7 +330,6 @@ def test_confirm_retry_returns_saved_reconstruction_without_another_fhir_write(
         )
     )
     assert result.resources[0].resource_id == "existing-encounter"
-    assert result.episode_ids == ["episode-1"]
 
 
 def test_rejected_confirmation_never_builds_fhir(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,7 +363,7 @@ def test_confirmation_allows_and_audits_clinician_correction(monkeypatch: pytest
 def test_fhir_resources_use_clinical_subject_and_proposal_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("MEDPLUM_PATIENT_ID", "patient-fhir-id")
+    monkeypatch.setenv("YC_DEMO_PATIENT_ID", "patient-fhir-id")
     payload = _confirm_payload(monkeypatch)
     payload.draft.proposed_changes.extend(
         [
@@ -378,18 +388,23 @@ def test_fhir_resources_use_clinical_subject_and_proposal_semantics(
         ]
     )
     resources = [
-        resource for _, resource in demo._fhir_resources(payload, _operator())  # noqa: SLF001
+        resource
+        for _, resource in demo._fhir_resources(  # noqa: SLF001
+            "patient-fhir-id", payload, _operator(), "Approved reconstruction"
+        )
     ]
     encounter = next(item for item in resources if item["resourceType"] == "Encounter")
     medication = next(item for item in resources if item["resourceType"] == "MedicationStatement")
     allergy = next(item for item in resources if item["resourceType"] == "AllergyIntolerance")
     follow_up = next(item for item in resources if item["resourceType"] == "ServiceRequest")
     questionnaire = next(item for item in resources if item["resourceType"] == "QuestionnaireResponse")
+    projection = next(item for item in resources if item["resourceType"] == "Task")
     assert encounter["serviceType"]["text"] == "AI-assisted pre-visit check-in"
     assert medication["medicationCodeableConcept"]["text"] == "metformin"
     assert allergy["code"]["text"] == "penicillin"
     assert allergy["patient"] == {"reference": "Patient/patient-fhir-id"}
     assert follow_up["intent"] == "proposal"
+    assert projection["code"]["text"] == "zep-demo-projection"
     assert demo._conditional_identifier(questionnaire).endswith(  # noqa: SLF001
         "|checkin-1:questionnaire-response"
     )
@@ -419,7 +434,7 @@ def test_operator_token_is_compared_server_side(monkeypatch: pytest.MonkeyPatch)
     assert demo._require_demo_operator(token) == _operator()  # noqa: SLF001
 
 
-def test_real_data_guard_requires_cross_provider_synthetic_binding(
+def test_real_data_guard_requires_canonical_synthetic_patient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signing = "signing-key-that-is-separate-and-at-least-32-chars"
@@ -430,31 +445,69 @@ def test_real_data_guard_requires_cross_provider_synthetic_binding(
         "YC_DEMO_ACCESS_TOKEN": access,
         "YC_DEMO_OPERATOR_ID": "operator-1",
         "YC_DEMO_OPERATOR_NAME": "Dr. Reviewer",
-        "ZEP_API_KEY": "zep-test",
-        "MEDPLUM_PATIENT_ID": "patient-1",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    chart = {
+    patient = {
+        "resourceType": "Patient",
         "id": "chart-1",
-        "display_name": "Jane Doe",
-        "metadata": {
-            "fields": {"tags": ["synthetic"], "dob": "2004-04-04"},
-            "yc_medplum_demo": {
-                "synthetic": True,
-                "medplum_patient_id": "patient-1",
-                "stedi_test_case": stedi.TEST_CASE_ID,
-            },
+        "name": [{"text": "Jane Doe"}],
+        "birthDate": "2004-04-04",
+        "identifier": [
+            {"system": medplum.ZEP_USER_SYSTEM, "value": medplum.DEMO_ZEP_USER_ID}
+        ],
+        "meta": {
+            "tag": [
+                {"system": medplum.SYNTHETIC_TAG_SYSTEM, "code": code}
+                for code in (
+                    medplum.SYNTHETIC_TAG_CODE,
+                    medplum.DEMO_TAG_CODE,
+                    medplum.DEMO_STEDI_TAG_CODE,
+                )
+            ]
         },
     }
-    monkeypatch.setattr(demo, "local_mock_enabled", lambda: False)
-    monkeypatch.setattr(demo, "remote_insforge_configured", lambda: True)
-    monkeypatch.setattr(demo, "get_chart_subject", lambda **_: chart)
-    assert demo._require_real_data_layer("chart-1", _operator()) == chart  # noqa: SLF001
-    chart["metadata"]["yc_medplum_demo"]["synthetic"] = False
+
+    class FakeCore:
+        def read(self, resource_type: str, resource_id: str) -> dict[str, Any]:
+            assert (resource_type, resource_id) == ("Patient", "chart-1")
+            return patient
+
+    class FakeRepo:
+        @staticmethod
+        def patient_view(resource: dict[str, Any]) -> dict[str, Any]:
+            return {"id": resource["id"], "zep_user_id": medplum.DEMO_ZEP_USER_ID}
+
+    monkeypatch.setattr(demo, "MedplumClient", lambda: medplum.MedplumClient(FakeCore()))
+    monkeypatch.setattr(demo, "repository", lambda: FakeRepo())
+    chart = asyncio.run(demo._require_real_data_layer("chart-1", _operator()))  # noqa: SLF001
+    assert chart["id"] == "chart-1"
+    patient["meta"]["tag"] = []
     with pytest.raises(HTTPException) as rejected:
-        demo._require_real_data_layer("chart-1", _operator())  # noqa: SLF001
-    assert rejected.value.status_code == 403
+        asyncio.run(demo._require_real_data_layer("chart-1", _operator()))  # noqa: SLF001
+    assert rejected.value.status_code == 409
+
+
+def test_public_demo_status_hides_an_unverified_patient_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("YC_DEMO_PATIENT_ID", "patient-1")
+    monkeypatch.setattr(
+        demo, "medplum_status", lambda: {"configured": True, "missing": []}
+    )
+
+    class FakeRepo:
+        @staticmethod
+        def get_patient(_patient_id: str) -> dict[str, Any]:
+            return {
+                "resourceType": "Patient",
+                "id": "patient-1",
+                "name": [{"text": "Real Person"}],
+                "birthDate": "1980-01-01",
+            }
+
+    monkeypatch.setattr(demo, "repository", lambda: FakeRepo())
+    assert demo.demo_status().demo_patient_id is None
 
 
 def test_moss_session_name_keeps_nonce_and_rejects_endpoint_overrides(
@@ -546,29 +599,13 @@ def test_reviewed_evidence_must_come_from_selected_patient_speaker(
         demo._validate_reviewed_draft(payload)  # noqa: SLF001
 
 
-def test_medplum_rejects_short_transaction_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MEDPLUM_CLIENT_ID", "client")
-    monkeypatch.setenv("MEDPLUM_CLIENT_SECRET", "secret")
-    client = medplum.MedplumClient()
+def test_medplum_rejects_short_transaction_response() -> None:
+    class FakeCore:
+        @staticmethod
+        def transaction(_entries: list[dict[str, Any]]) -> dict[str, Any]:
+            return {"resourceType": "Bundle", "type": "transaction-response", "entry": []}
 
-    async def fake_token() -> str:
-        return "token"
-
-    monkeypatch.setattr(client, "_token", fake_token)
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        medplum.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: real_async_client(
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200,
-                    json={"resourceType": "Bundle", "type": "transaction-response", "entry": []},
-                )
-            ),
-            timeout=kwargs.get("timeout"),
-        ),
-    )
+    client = medplum.MedplumClient(FakeCore())
     with pytest.raises(SponsorIntegrationError, match="cardinality"):
         asyncio.run(
             client.transact(
@@ -595,3 +632,229 @@ def test_incomplete_workflow_cannot_report_readiness(monkeypatch: pytest.MonkeyP
             )
         )
     assert incomplete.value.status_code == 409
+
+
+def test_medplum_validation_rejects_error_operation_outcome() -> None:
+    class FakeCore:
+        @staticmethod
+        def validate(_resource: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "diagnostics": "Invalid synthetic resource"}],
+            }
+
+    client = medplum.MedplumClient(FakeCore())
+    with pytest.raises(SponsorIntegrationError, match="did not validate"):
+        asyncio.run(client.validate_resources([{"resourceType": "Encounter"}]))
+
+
+def test_journal_lookup_is_scoped_to_patient_and_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    metadata = {
+        "yc_demo_checkin": True,
+        "checkin_id": "checkin-1",
+        "workflow_state": "complete",
+        "validation_status": "passed",
+        "medplum_resources": [{"resource_type": "Encounter", "resource_id": "e1", "status": "200"}],
+    }
+    resource = {
+        "resourceType": "DocumentReference",
+        "id": "journal-1",
+        "identifier": [
+            {"system": demo._CHECKIN_IDENTIFIER_SYSTEM, "value": "checkin-1:reconstruction"}  # noqa: SLF001
+        ],
+        "meta": {
+            "tag": [{"system": demo.TAG_SYSTEM, "code": demo._CHECKIN_JOURNAL_TAG}]  # noqa: SLF001
+        },
+        "subject": {"reference": "Patient/patient-1"},
+        "content": [
+            {
+                "attachment": {
+                    "contentType": "application/json",
+                    "data": base64.b64encode(json.dumps(metadata).encode()).decode(),
+                }
+            }
+        ],
+    }
+
+    class FakeClient:
+        @staticmethod
+        def search(resource_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+            captured.update({"resource_type": resource_type, "params": params})
+            return [resource]
+
+    class FakeRepo:
+        client = FakeClient()
+
+    monkeypatch.setattr(demo, "repository", lambda: FakeRepo())
+    row = demo._find_checkin_document("patient-1", "checkin-1")  # noqa: SLF001
+    assert row and row["doc_id"] == "journal-1"
+    assert captured["params"]["subject"] == "Patient/patient-1"
+    assert captured["params"]["identifier"].endswith("|checkin-1:reconstruction")
+
+
+def test_eligibility_retry_uses_existing_medplum_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "transaction_id": "stedi-1",
+        "trace_id": "trace-1",
+        "application_mode": "test",
+        "coverage_active": True,
+        "plan_status": [],
+        "benefits": [],
+        "patient_responsibility_summary": "Not determinable from test-mode eligibility alone.",
+        "disclaimer": "Synthetic test data.",
+    }
+    eligibility_doc = {
+        "resourceType": "DocumentReference",
+        "id": "eligibility-1",
+        "meta": {"versionId": "2"},
+        "content": [
+            {
+                "attachment": {
+                    "contentType": "application/json",
+                    "data": base64.b64encode(json.dumps(result).encode()).decode(),
+                }
+            }
+        ],
+    }
+    journal = {
+        "doc_id": "journal-1",
+        "metadata": {
+            "yc_demo_checkin": True,
+            "workflow_state": "complete",
+            "validation_status": "passed",
+            "medplum_resources": [{"resource_type": "Encounter", "resource_id": "e1", "status": "200"}],
+        },
+    }
+    monkeypatch.setattr(demo, "_enforce_sponsor_rate_limit", lambda *_: None)
+    monkeypatch.setattr(demo, "_find_checkin_document", lambda *_, **__: journal)
+    monkeypatch.setattr(demo, "_find_eligibility_document", lambda *_: eligibility_doc)
+
+    async def fail_if_called() -> dict[str, Any]:
+        raise AssertionError("Stedi must not be called after its FHIR document exists")
+
+    monkeypatch.setattr(demo, "check_eligibility", fail_if_called)
+    monkeypatch.setattr(
+        demo,
+        "_update_document_metadata",
+        lambda *_: {"doc_id": "journal-1", "metadata": journal["metadata"]},
+    )
+    response = asyncio.run(
+        demo.eligibility(
+            "patient-1",
+            type("Payload", (), {"checkin_id": "checkin-1"})(),
+            _operator(),
+            {"zep_user_id": medplum.DEMO_ZEP_USER_ID},
+        )
+    )
+    assert response.transaction_id == "stedi-1"
+    assert response.medplum_resource.resource_id == "eligibility-1"
+
+
+def test_zep_worker_marks_provider_failure_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed: list[str | None] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get_patient(_patient_id: str) -> dict[str, Any]:
+            return {
+                "id": "patient-1",
+                "identifier": [
+                    {"system": medplum.ZEP_USER_SYSTEM, "value": medplum.DEMO_ZEP_USER_ID}
+                ],
+                "name": [{"text": "Jane Doe"}],
+            }
+
+        @staticmethod
+        def complete_projection_task(_task: dict[str, Any], *, error: str | None = None, episode_count: int = 0) -> None:
+            del episode_count
+            completed.append(error)
+
+        @staticmethod
+        def abandon_projection_task(_task: dict[str, Any], *, reason: str) -> None:
+            raise AssertionError(reason)
+
+    monkeypatch.setattr(medplum_zep_worker, "repository", lambda: FakeRepo())
+    monkeypatch.setattr(
+        medplum_zep_worker,
+        "ensure_user",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("Zep unavailable")),
+    )
+    task = {
+        "code": {"text": "zep-demo-projection"},
+        "for": {"reference": "Patient/patient-1"},
+        "focus": {"reference": "DocumentReference/journal-1"},
+        "input": [{"type": {"text": "note-text"}, "valueString": "Approved note"}],
+    }
+    assert medplum_zep_worker.process_task(task) is False
+    assert completed == ["Zep projection failed; the worker will retry."]
+
+
+def test_zep_worker_abandons_patient_without_projection_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    abandoned: list[str] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get_patient(_patient_id: str) -> dict[str, Any]:
+            return {"id": "patient-1", "name": [{"text": "Jane Doe"}]}
+
+        @staticmethod
+        def abandon_projection_task(_task: dict[str, Any], *, reason: str) -> None:
+            abandoned.append(reason)
+
+    monkeypatch.setattr(medplum_zep_worker, "repository", lambda: FakeRepo())
+    assert medplum_zep_worker.process_task(
+        {"for": {"reference": "Patient/patient-1"}, "code": {"text": "zep-demo-projection"}}
+    ) is False
+    assert abandoned == ["Patient is missing its Zep projection identifier."]
+
+
+def test_demo_provisioner_is_idempotent_and_uses_canonical_patient_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    identifiers: list[str] = []
+    patient_calls: list[dict[str, Any]] = []
+
+    class FakeClient:
+        @staticmethod
+        def conditional_upsert(
+            resource: dict[str, Any], *, identifier: str
+        ) -> dict[str, Any]:
+            identifiers.append(identifier)
+            return {**resource, "id": identifier.rsplit("|", 1)[-1].replace(":", "-")}
+
+    class FakeRepo:
+        client = FakeClient()
+
+        @staticmethod
+        def upsert_patient(**kwargs: Any) -> dict[str, Any]:
+            patient_calls.append(kwargs)
+            return {"resourceType": "Patient", "id": "patient-1"}
+
+    monkeypatch.delenv("YC_DEMO_PATIENT_ID", raising=False)
+    monkeypatch.setattr(provision_yc_demo_patient, "load_repo_env", lambda: None)
+    monkeypatch.setattr(provision_yc_demo_patient, "medplum_configured", lambda: True)
+    monkeypatch.setattr(provision_yc_demo_patient, "repository", lambda: FakeRepo())
+    monkeypatch.setattr(
+        provision_yc_demo_patient,
+        "validate_synthetic_patient",
+        lambda patient, patient_id: patient,
+    )
+    assert provision_yc_demo_patient.main() == 0
+    assert provision_yc_demo_patient.main() == 0
+    assert patient_calls[0]["tags"] == [
+        medplum.SYNTHETIC_TAG_CODE,
+        medplum.DEMO_TAG_CODE,
+        medplum.DEMO_STEDI_TAG_CODE,
+    ]
+    assert len(set(identifiers)) == 6
+    assert "YC_DEMO_PATIENT_ID=patient-1" in capsys.readouterr().out

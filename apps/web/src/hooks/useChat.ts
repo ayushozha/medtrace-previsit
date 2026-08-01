@@ -74,9 +74,12 @@ export function useChat(chartSubjectId: string | null): UseChatResult {
       setSending(true);
       setError(null);
       try {
-        const out = await apiPost<SendMessageResult, { user_input: string; deep: boolean }>(
+        const out = await apiPost<
+          SendMessageResult,
+          { user_input: string; deep: boolean; request_id: string }
+        >(
           `/api/threads/${thread.zep_thread_id}/messages`,
-          { user_input: text, deep: !!opts?.deep },
+          { user_input: text, deep: !!opts?.deep, request_id: crypto.randomUUID() },
         );
         setMessages((prev) => [...prev, out.user, out.assistant]);
       } catch (err) {

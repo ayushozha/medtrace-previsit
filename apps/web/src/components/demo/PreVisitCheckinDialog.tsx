@@ -146,8 +146,7 @@ export function PreVisitCheckinDialog({
   }, [patientId]);
 
   const checkinProvidersReady =
-    status?.data_mode === 'remote' &&
-    status.demo_patient_id === patientId &&
+    status?.demo_patient_id === patientId &&
     accessToken.length >= 32 &&
     Boolean(
       status.deepgram.configured &&
@@ -312,10 +311,6 @@ export function PreVisitCheckinDialog({
           {PROVIDERS.map(([key, name]) => (
             <ProviderPill key={key} name={name} status={status?.[key]} />
           ))}
-          <ProviderPill
-            name="InsForge"
-            status={{ configured: status?.data_mode === 'remote', missing: ['INSFORGE_*'] }}
-          />
         </div>
 
         {error && (
