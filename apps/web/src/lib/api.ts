@@ -100,18 +100,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
-export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return request<T>(path, { method: 'GET', signal });
+export function apiGet<T>(path: string, signal?: AbortSignal, headers?: HeadersInit): Promise<T> {
+  return request<T>(path, { method: 'GET', signal, headers });
 }
 
 export function apiPost<TResp, TBody = unknown>(
   path: string,
   body?: TBody,
   signal?: AbortSignal,
+  headers?: HeadersInit,
 ): Promise<TResp> {
   return request<TResp>(path, {
     method: 'POST',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: body !== undefined ? { 'Content-Type': 'application/json', ...headers } : headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });
@@ -122,6 +123,7 @@ export async function apiUpload<TResp>(
   file: File,
   fields: Record<string, string> = {},
   signal?: AbortSignal,
+  headers?: HeadersInit,
 ): Promise<TResp> {
   const fd = new FormData();
   fd.append('file', file, file.name);
@@ -132,6 +134,7 @@ export async function apiUpload<TResp>(
     method: 'POST',
     body: fd,
     signal,
+    headers,
   });
   if (!res.ok) {
     throw await parseError(res);

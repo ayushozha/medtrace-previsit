@@ -57,6 +57,11 @@ def _remote_insforge_configured() -> bool:
     return bool(url and key and profile)
 
 
+def remote_insforge_configured() -> bool:
+    """True only for the real InsForge service, never the local file fallback."""
+    return _remote_insforge_configured()
+
+
 def insforge_persistence_enabled() -> bool:
     """True when either real InsForge creds are set or local mock mode is on."""
     return local_mock_enabled() or _remote_insforge_configured()
@@ -415,6 +420,33 @@ def fetch_documents_registry(
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else []
+
+
+@local_mock_fallback
+def update_document_metadata(
+    *,
+    doc_id: str,
+    metadata_patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Merge metadata into one profile-owned document row."""
+    rows = fetch_documents_registry()
+    existing = next((row for row in rows if str(row.get("doc_id")) == doc_id), None)
+    if not existing:
+        return None
+    current = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+    merged = {**current, **metadata_patch}
+    with httpx.Client(timeout=30.0) as client:
+        response = client.patch(
+            _records("documents"),
+            headers={**_headers(), "Prefer": "return=representation"},
+            params={"doc_id": f"eq.{doc_id}", "profile_id": f"eq.{_profile_id()}"},
+            json={"metadata": merged},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return payload[0]
+    return None
 
 
 def document_row_to_ingested_doc(row: dict[str, Any]) -> dict[str, Any]:

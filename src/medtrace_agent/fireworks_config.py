@@ -12,9 +12,7 @@ DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1/"
 # Fireworks retires serverless model ids fairly often, and entitlement varies by key — a stale
 # id fails as `404 Model not found, inaccessible, and/or not deployed`, not as an auth error.
 # `scripts/fireworks_probe_models.py` lists what your key can actually reach.
-DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/kimi-k2p6"
-# Multimodal default for PDF page ingest (must accept image_url content blocks).
-DEFAULT_FIREWORKS_VL_MODEL = "accounts/fireworks/models/kimi-k2p6"
+# Multimodal model for PDF page ingest (must accept image_url content blocks).
 
 
 def _env_model(var: str) -> str:
@@ -36,13 +34,17 @@ def fireworks_api_key() -> str:
 
 def fireworks_chat_model() -> str:
     m = _env_model("FIREWORKS_MODEL")
-    return m or DEFAULT_FIREWORKS_MODEL
+    if not m:
+        raise RuntimeError("FIREWORKS_MODEL is not set.")
+    return m
 
 
 def fireworks_vlm_model() -> str:
     """Multimodal model id for PDF vision ingest (never falls back to a text-only chat model)."""
     m = _env_model("FIREWORKS_VL_MODEL")
-    return m or DEFAULT_FIREWORKS_VL_MODEL
+    if not m:
+        raise RuntimeError("FIREWORKS_VL_MODEL is not set.")
+    return m
 
 
 def fireworks_vlm_api_mode() -> str:

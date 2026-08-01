@@ -121,7 +121,7 @@ Runs the dashboard with **no InsForge and no Zep reads**:
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter** (`MEDSAM2_ADAPTER_MODULE` /
 `MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Qwen VL via Nebius
-(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock without the key.
+(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock only when both key and model are absent, and fail visibly when the pair is incomplete.
 
 **DICOM handling:** `pydicom`, rescaled via `RescaleSlope`/`RescaleIntercept`, windowed via
 `WindowCenter`/`WindowWidth`. ROI prompts are normalised 0–1 and converted to pixels backend-side.

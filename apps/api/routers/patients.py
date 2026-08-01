@@ -73,6 +73,32 @@ def _row_to_patient(row: dict[str, Any], *, document_count: int = 0) -> PatientO
     )
 
 
+def _approved_checkin_timeline(rows: list[dict[str, Any]]) -> list[TimelineEvent]:
+    events: list[TimelineEvent] = []
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if not (
+            metadata.get("yc_demo_checkin")
+            and metadata.get("workflow_state") == "complete"
+            and metadata.get("validation_status") == "passed"
+        ):
+            continue
+        draft = metadata.get("draft") if isinstance(metadata.get("draft"), dict) else {}
+        changes = [item for item in draft.get("proposed_changes") or [] if isinstance(item, dict)]
+        approved_at = str(metadata.get("approved_at") or row.get("uploaded_at") or "")
+        date = approved_at[:10] or "Today"
+        summary = [
+            f"Pre-visit check-in approved by {metadata.get('clinician_name') or 'clinician'}",
+            *[
+                f"{item.get('title')}: {item.get('proposed_value')}"
+                for item in changes[:3]
+                if item.get("title") and item.get("proposed_value")
+            ],
+        ]
+        events.append(TimelineEvent(date=date, events=summary))
+    return sorted(events, key=lambda item: item.date, reverse=True)
+
+
 @router.get("", response_model=list[PatientOut], dependencies=[RequireInsforgeDep])
 def list_patients(profile_id: str = Depends(get_demo_profile_id)) -> list[PatientOut]:
     rows = list_chart_subjects(profile_id=profile_id)
@@ -224,6 +250,7 @@ def get_snapshot(chart_subject_id: str) -> ClinicalSnapshotOut:
     from apps.api.routers.documents import _row_to_document
 
     documents = [_row_to_document(r) for r in docs_rows]
+    approved_checkins = _approved_checkin_timeline(docs_rows)
     patient = _row_to_patient(row, document_count=len(documents))
     meta = _meta(row)
     clinical = meta.get("clinical") if isinstance(meta.get("clinical"), dict) else {}
@@ -264,7 +291,7 @@ def get_snapshot(chart_subject_id: str) -> ClinicalSnapshotOut:
                 for c in clinical.get("labs") or []
                 if isinstance(c, dict)
             ],
-            timeline=[
+            timeline=approved_checkins + [
                 TimelineEvent.model_validate(c)
                 for c in clinical.get("timeline") or []
                 if isinstance(c, dict)
@@ -287,7 +314,7 @@ def get_snapshot(chart_subject_id: str) -> ClinicalSnapshotOut:
         recent_abnormal=_recent_abnormal(zep_user_id),
         risk_alerts=_alerts(zep_user_id),
         lab_trends=_labs(zep_user_id),
-        timeline=_timeline(zep_user_id),
+        timeline=approved_checkins + _timeline(zep_user_id),
         documents=documents,
         doctor_checklist=meta.get("doctor_checklist")
         or [

@@ -21,6 +21,8 @@ import type { ClinicalSnapshot, RiskLevel } from '@/lib/types';
 interface DashboardHomeProps {
   patientId: string;
   onBack?: () => void;
+  headerAction?: React.ReactNode;
+  suggestedPrompts?: string[];
 }
 
 const priorityClass: Record<RiskLevel, string> = {
@@ -29,7 +31,7 @@ const priorityClass: Record<RiskLevel, string> = {
   Low: 'border-slate-200 bg-slate-50 text-slate-700',
 };
 
-export function DashboardHome({ patientId, onBack }: DashboardHomeProps) {
+export function DashboardHome({ patientId, onBack, headerAction, suggestedPrompts }: DashboardHomeProps) {
   const { snapshot, loading, error, refresh } = useSnapshot(patientId);
 
   if (loading && !snapshot) {
@@ -59,17 +61,29 @@ export function DashboardHome({ patientId, onBack }: DashboardHomeProps) {
     return <FullScreenStatus icon={<TriangleAlert size={20} />} text="Patient not found." onBack={onBack} />;
   }
 
-  return <DashboardBody snapshot={snapshot} onBack={onBack} onRefresh={() => void refresh()} />;
+  return (
+    <DashboardBody
+      snapshot={snapshot}
+      onBack={onBack}
+      onRefresh={() => void refresh()}
+      headerAction={headerAction}
+      suggestedPrompts={suggestedPrompts}
+    />
+  );
 }
 
 function DashboardBody({
   snapshot,
   onBack,
   onRefresh,
+  headerAction,
+  suggestedPrompts,
 }: {
   snapshot: ClinicalSnapshot;
   onBack?: () => void;
   onRefresh: () => void;
+  headerAction?: React.ReactNode;
+  suggestedPrompts?: string[];
 }) {
   const { patient } = snapshot;
   const sexLabel = patient.sex === 'M' ? 'Male' : patient.sex === 'F' ? 'Female' : 'Other';
@@ -135,13 +149,16 @@ function DashboardBody({
             </div>
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-4 lg:w-[540px]">
+          <div className="flex flex-col items-stretch gap-2 lg:w-[540px]">
+            {headerAction ? <div className="flex justify-end">{headerAction}</div> : null}
+            <div className="grid gap-2 sm:grid-cols-4">
             {patientMeta.map(([label, value]) => (
               <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                 <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">{label}</p>
                 <p className="mt-1 truncate text-xs font-semibold text-slate-800">{value}</p>
               </div>
             ))}
+            </div>
           </div>
         </div>
       </header>
@@ -406,6 +423,7 @@ function DashboardBody({
               patientName={patient.name}
               primaryDoctor={patient.primary_doctor ?? 'Doctor'}
               onUploaded={onRefresh}
+              suggestedPrompts={suggestedPrompts}
             />
           </div>
         </aside>

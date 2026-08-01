@@ -390,6 +390,11 @@ def _clinical_for_index(i: int, display_name: str) -> dict[str, Any]:
     return light[(i - 1) % len(light)]
 
 
+def chronic_care_demo_fixture(display_name: str = "Jane Doe") -> dict[str, Any]:
+    """Return the existing rich synthetic chronic-care fixture for real-demo provisioning."""
+    return _clinical_for_index(0, display_name)
+
+
 def _demo_documents(chart_id: str, profile_id: str, i: int) -> list[dict[str, Any]]:
     if i != 0:
         return []
@@ -574,6 +579,22 @@ def fetch_documents_registry(*, chart_subject_id: str | None = None) -> list[dic
     if chart_subject_id:
         rows = [r for r in rows if str(r.get("chart_subject_id")) == chart_subject_id]
     return sorted(rows, key=lambda r: str(r.get("uploaded_at") or ""), reverse=True)
+
+
+def update_document_metadata(
+    *,
+    doc_id: str,
+    metadata_patch: dict[str, Any],
+) -> dict[str, Any] | None:
+    store = _load()
+    for row in store["documents"]:
+        if str(row.get("doc_id")) != doc_id:
+            continue
+        current = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        row["metadata"] = {**current, **metadata_patch}
+        _save(store)
+        return row
+    return None
 
 
 def insert_document_record(

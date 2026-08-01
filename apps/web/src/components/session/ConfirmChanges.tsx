@@ -32,6 +32,7 @@ function ChangePreview({ previous, proposed }: { previous: string; proposed: str
 
 interface ConfirmChangesProps {
   respond?: ((payload: { accepted: boolean }) => void) | undefined;
+  allowWithoutRespond?: boolean;
   previousMarkdown: string;
   proposedMarkdown: string;
   onReject: () => void;
@@ -41,19 +42,21 @@ interface ConfirmChangesProps {
 /** Human-in-the-loop gate: the agent's document edits need explicit clinician approval. */
 export function ConfirmChanges({
   respond,
+  allowWithoutRespond = false,
   previousMarkdown,
   proposedMarkdown,
   onReject,
   onConfirm,
 }: ConfirmChangesProps) {
   const [accepted, setAccepted] = useState<boolean | null>(null);
+  const canDecide = Boolean(respond) || allowWithoutRespond;
 
   const decide = (value: boolean) => {
-    if (!respond) return;
+    if (!canDecide) return;
     setAccepted(value);
     if (value) onConfirm();
     else onReject();
-    respond({ accepted: value });
+    respond?.({ accepted: value });
   };
 
   const hasDiff = proposedMarkdown.trim().length > 0 && proposedMarkdown !== previousMarkdown;
@@ -71,10 +74,10 @@ export function ConfirmChanges({
       )}
       {accepted === null ? (
         <div className="confirm-changes-actions">
-          <button type="button" disabled={!respond} onClick={() => decide(false)}>
+          <button type="button" disabled={!canDecide} onClick={() => decide(false)}>
             Reject
           </button>
-          <button type="button" disabled={!respond} onClick={() => decide(true)}>
+          <button type="button" disabled={!canDecide} onClick={() => decide(true)}>
             Confirm
           </button>
         </div>

@@ -85,9 +85,12 @@ class VoicePipeline:
 
         try:
             base64_data = base64.b64encode(audio_bytes).decode("utf-8")
+            gemini_model = (os.environ.get("GEMINI_TRANSCRIBE_MODEL") or "").strip()
+            if not gemini_model:
+                raise RuntimeError("GEMINI_TRANSCRIBE_MODEL is required for Gemini transcription.")
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.5-flash:generateContent?key={gemini_key}"
+                f"{gemini_model}:generateContent?key={gemini_key}"
             )
             payload = {
                 "contents": [
@@ -120,8 +123,10 @@ class VoicePipeline:
             or audio_bytes.startswith(b"\xff\xf2")
         )
         filename = "audio.mp3" if is_mp3 else "audio.wav"
-        stt_model = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-        chat_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        stt_model = (os.environ.get("OPENAI_TRANSCRIBE_MODEL") or "").strip()
+        chat_model = (os.environ.get("OPENAI_MODEL") or "").strip()
+        if not stt_model or not chat_model:
+            raise RuntimeError("OPENAI_TRANSCRIBE_MODEL and OPENAI_MODEL are required.")
 
         def _run() -> str:
             # Audio endpoints live on OpenAI proper, so use the direct client.
@@ -167,9 +172,13 @@ class VoicePipeline:
             print("[TTS] OPENAI_API_KEY not set — skipping speech synthesis.")
             return b""
         try:
+            tts_model = (os.environ.get("OPENAI_TTS_MODEL") or "").strip()
+            tts_voice = (os.environ.get("OPENAI_TTS_VOICE") or "").strip()
+            if not tts_model or not tts_voice:
+                raise RuntimeError("OPENAI_TTS_MODEL and OPENAI_TTS_VOICE are required for speech output.")
             response = self.client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",
+                model=tts_model,
+                voice=tts_voice,
                 input=text,
                 response_format="mp3"
             )
@@ -178,8 +187,8 @@ class VoicePipeline:
             print(f"[TTS] Custom endpoint failed, trying fallback: {e}")
             try:
                 response = self.fallback_client.audio.speech.create(
-                    model="tts-1",
-                    voice="alloy",
+                    model=tts_model,
+                    voice=tts_voice,
                     input=text,
                     response_format="mp3"
                 )

@@ -61,9 +61,12 @@ async def chat_node(state: AgentState, config: Optional[RunnableConfig] = None):
     """
 
     # Define the model from environment variables
-    model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = (os.environ.get("OPENAI_MODEL") or "").strip()
     base_url = os.environ.get("OPENAI_BASE_URL", None)
     api_key = os.environ.get("OPENAI_API_KEY", None)
+
+    if not model_name:
+        raise RuntimeError("OPENAI_MODEL is required for the transcription report agent.")
 
     model = ChatOpenAI(
         model=model_name,

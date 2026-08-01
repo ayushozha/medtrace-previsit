@@ -9,7 +9,7 @@ description = "Zep-backed clinical memory service with LangChain agents (RAG + D
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.27.0",
+    "httpx>=0.28.1",
     "langtrace-python-sdk>=2.1.0",
     "zep-cloud>=3.0.0",
     "langchain-openai>=0.3.0",
@@ -23,6 +23,10 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
+    # Direct dependency for Responses API structured outputs used by the demo.
+    "openai>=2.52.0,<3",
+    # Pinned: Moss includes the platform-specific inferedge-moss-core binary.
+    "moss==1.7.2",
 ]
 
 [project.optional-dependencies]
