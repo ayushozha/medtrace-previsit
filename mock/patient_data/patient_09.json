@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-009",
+  "display_name": "Jamie Frost",
+  "notes": "Synthetic InsForge persistence pairing — chart_subject metadata demo.",
+  "tags": ["synthetic", "insforge-sync", "storage-registry"],
+  "cohort": "mock-2026-q2",
+  "scenario": "Verify chart_subjects.metadata round-trip when persistence enabled.",
+  "demographics": {
+    "age_band": "35-44",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "orange"
+  },
+  "extra": {
+    "seed_run_id": "mock-009",
+    "demo_role": "insforge-metadata"
+  }
+}

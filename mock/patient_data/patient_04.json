@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-004",
+  "display_name": "Riley Chen",
+  "notes": "Synthetic radiology report ingest pairing — placeholder metadata.",
+  "tags": ["synthetic", "mock-imaging", "radiology-note-demo"],
+  "cohort": "mock-2026-q1",
+  "scenario": "Pairs with sample radiology_note folder ingest in demos.",
+  "demographics": {
+    "age_band": "50-59",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "amber"
+  },
+  "extra": {
+    "seed_run_id": "mock-004",
+    "demo_role": "imaging-ingest"
+  }
+}

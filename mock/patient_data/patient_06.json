@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-006",
+  "display_name": "Casey Okonkwo",
+  "notes": "Synthetic PubMed tool regression patient shell.",
+  "tags": ["synthetic", "deep-agent", "literature-demo"],
+  "cohort": "mock-2026-q1",
+  "scenario": "Deep Agent turns that should call pubmed_search_literature.",
+  "demographics": {
+    "age_band": "70-79",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "emerald"
+  },
+  "extra": {
+    "seed_run_id": "mock-006",
+    "demo_role": "pubmed-tooling"
+  }
+}

@@ -1,0 +1,88 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets and local env (never commit keys). Keep *.example templates tracked.
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+
+# Jupyter / tooling
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage/
+.turbo/
+.cache/
+
+# Node / web build artifacts (all workspaces)
+node_modules/
+dist/
+
+# Runtime / local databases (transcription sessions, etc.)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+
+# Radiology API runtime uploads (DICOM studies + generated previews)
+data/studies/
+*.dcm
+
+# Local clinical notes / uploads under data/ (keep .gitkeep only)
+data/**/*.txt
+data/**/*.pdf
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/local_mock/
+
+# Cursor (optional local rules; remove line if you want to commit .cursor rules)
+.cursor/
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf
+
+# Excluded from the public snapshot pending provenance/content review.
+services/transcription/turn_01_patient.mp3
+services/transcription/walkthrough.md
+services/transcription/implementation_plan.md

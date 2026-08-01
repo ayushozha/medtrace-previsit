@@ -1,0 +1,20 @@
+{
+  "name": "medtrace-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "One FastAPI service (clinical + imaging) and one web app, plus the transcription prototype.",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c magenta,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8001 --reload",
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:transcription": "concurrently -k -n tr-api,tr-copilot -c yellow,red \"npm:dev:transcription-api\" \"npm:dev:transcription-copilot\"",
+    "dev:transcription-api": "python -m uvicorn main:app --app-dir services/transcription/backend --host 127.0.0.1 --port 8010 --reload",
+    "dev:transcription-copilot": "npm --prefix services/transcription/copilotkit-server run dev",
+    "lint": "npm --prefix apps/web run lint",
+    "build": "npm --prefix apps/web run build",
+    "test:py": "python -m pytest -m \"not integration\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

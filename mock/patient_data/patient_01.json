@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-001",
+  "display_name": "Jordan Vale",
+  "notes": "Synthetic adult wellness visit narrative — demo.",
+  "tags": ["synthetic", "mock-cohort-a", "wellness"],
+  "cohort": "mock-2026-q1",
+  "scenario": "Routine follow-up dialogue with generic lifestyle questions.",
+  "demographics": {
+    "age_band": "40-49",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "slate"
+  },
+  "extra": {
+    "seed_run_id": "mock-001",
+    "demo_role": "primary-care-smoke"
+  }
+}

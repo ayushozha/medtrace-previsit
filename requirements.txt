@@ -1,0 +1,10 @@
+# Install the package in editable mode (preferred).
+#   pip install -e ".[dev,imaging]"
+#   uv pip install -e ".[dev,imaging]"
+#
+# Extras:
+#   dev            pytest
+#   imaging        pydicom / numpy / pillow for the DICOM routes
+#   medgemma-local torch / transformers, only for MEDGEMMA_MODEL_ID
+
+-e .[dev,imaging]

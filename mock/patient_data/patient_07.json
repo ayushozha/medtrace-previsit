@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-007",
+  "display_name": "Quinn Patel",
+  "notes": "Synthetic ontology search harness — graph inspector demos.",
+  "tags": ["synthetic", "ontology-search", "graph-demo"],
+  "cohort": "mock-2026-q2",
+  "scenario": "Populate graph then exercise ontology node/edge search.",
+  "demographics": {
+    "age_band": "40-49",
+    "locale": "en-GB"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "violet"
+  },
+  "extra": {
+    "seed_run_id": "mock-007",
+    "demo_role": "ontology-inspector"
+  }
+}

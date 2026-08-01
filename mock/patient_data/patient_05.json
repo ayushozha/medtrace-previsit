@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-005",
+  "display_name": "Morgan Blake",
+  "notes": "Synthetic session-note transcript harness.",
+  "tags": ["synthetic", "mock-session-note", "conversation-note-demo"],
+  "cohort": "mock-2026-q2",
+  "scenario": "Conversation_note ingest smoke path.",
+  "demographics": {
+    "age_band": "20-29",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "true",
+    "chart_color": "rose"
+  },
+  "extra": {
+    "seed_run_id": "mock-005",
+    "demo_role": "session-note-ingest"
+  }
+}

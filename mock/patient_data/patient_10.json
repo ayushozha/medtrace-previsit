@@ -1,0 +1,17 @@
+{
+  "zep_user_id": "synthetic-mock-pt-010",
+  "display_name": "Reese Dalton",
+  "notes": "Synthetic minimal record — only required field exercised elsewhere.",
+  "tags": ["synthetic", "minimal-json"],
+  "cohort": "mock-2026-q1",
+  "scenario": "Bare-bones patient switch for empty optional-field paths.",
+  "demographics": {
+    "age_band": "18-29",
+    "locale": "en-US"
+  },
+  "preferences": {},
+  "extra": {
+    "seed_run_id": "mock-010",
+    "demo_role": "minimal-profile"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "zep_user_id": "synthetic-mock-pt-003",
+  "display_name": "Taylor Kim",
+  "notes": "Synthetic chronic-condition coaching stub — not clinical advice.",
+  "tags": ["synthetic", "mock-cohort-a", "chronic-care"],
+  "cohort": "mock-2026-q2",
+  "scenario": "Medication-adherence discussion prompts for agent evaluation.",
+  "demographics": {
+    "age_band": "60-69",
+    "locale": "en-US"
+  },
+  "preferences": {
+    "sidebar_compact": "false",
+    "chart_color": "indigo"
+  },
+  "extra": {
+    "seed_run_id": "mock-003",
+    "demo_role": "longitudinal-chat"
+  }
+}
