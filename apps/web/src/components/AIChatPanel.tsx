@@ -269,7 +269,7 @@ export function AIChatPanel({
                   {uploading ? <Loader2 size={14} className="animate-spin" /> : <Paperclip size={14} />}
                 </button>
                 <Link
-                  to={`/yc-medplum-hackathon-demo?patientId=${encodeURIComponent(patientId)}`}
+                  to="/session"
                   className="rounded-md p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-700"
                   title="Record a voice consultation"
                 >
