@@ -39,7 +39,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
-from apps.api.routers import clinical, documents, patients, studies, threads  # noqa: E402
+from apps.api.routers import clinical, demo, documents, patients, studies, threads  # noqa: E402
 from medtrace_agent.imaging.storage import data_dir  # noqa: E402
 from medtrace_agent.ontology import auto_apply_clinical_ontology  # noqa: E402
 
@@ -108,6 +108,7 @@ app.include_router(documents.router)
 app.include_router(threads.router)
 app.include_router(clinical.router)
 app.include_router(studies.router)
+app.include_router(demo.router)
 
 # Study previews and segmentation overlays are referenced by URL in API responses.
 app.mount("/data", StaticFiles(directory=data_dir()), name="data")

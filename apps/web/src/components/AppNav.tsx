@@ -1,4 +1,4 @@
-import { Mic, ScanLine, Stethoscope } from 'lucide-react';
+import { Mic, ScanLine, Sparkles, Stethoscope } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 
@@ -6,6 +6,7 @@ const LINKS = [
   { to: '/', label: 'Patients', icon: Stethoscope, end: true },
   { to: '/imaging', label: 'Imaging', icon: ScanLine, end: false },
   { to: '/session', label: 'Session', icon: Mic, end: false },
+  { to: '/yc-medplum-hackathon-demo', label: 'YC Demo', icon: Sparkles, end: false },
 ] as const;
 
 /**

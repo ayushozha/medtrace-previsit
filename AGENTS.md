@@ -21,9 +21,10 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
   - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Qwen VL via
     Nebius). **Runs fully in mock mode with no secrets** — the easiest path to a
     working end-to-end demo.
-- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app, three
+- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app, four
   routes: `/` + `/patients/:id` (dashboard), `/imaging` (DICOM viewer),
-  `/session` (voice consultation, lazy-loaded).
+  `/session` (voice consultation, lazy-loaded), and
+  `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit demo).
 - **`services/transcription/`** — preserved prototype backing `/session`: a
   LangGraph backend (8010) behind a CopilotKit Express runtime (4000). Started
   separately with `npm run dev:transcription`; uses **OpenAI directly**
@@ -37,7 +38,7 @@ gotchas), `DBMS-design.md` (InsForge Postgres schema).
 ```
 apps/
   api/               FastAPI service — clinical + imaging (apps.api.main:app, 8001)
-  web/               React/Vite UI — all three product surfaces (3000)
+  web/               React/Vite UI — dashboard, imaging, session, and YC demo (3000)
 services/
   transcription/     Voice/CopilotKit prototype (backend 8010, runtime 4000)
 src/medtrace_agent/  Shared package (Zep, ingest, agents, imaging, InsForge, ontology)
@@ -169,7 +170,8 @@ response (local-mock path); otherwise it falls back to the derived Zep builders.
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter**
 (`MEDSAM2_ADAPTER_MODULE` / `MEDGEMMA_MODEL_ID`) → **deterministic mock**.
 Reports use Qwen VL via Nebius (`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`,
-`NEBIUS_QWEN_VL_MODEL`); deterministic mock without the key. DICOM previews:
+`NEBIUS_QWEN_VL_MODEL`); deterministic mock only when both key and model are absent,
+and an explicit configuration error when the pair is incomplete. DICOM previews:
 pydicom with `RescaleSlope`/`RescaleIntercept` and windowing
 (`WindowCenter`/`WindowWidth`); ROI prompts are normalized 0–1 and converted to
 pixels server-side.
@@ -180,8 +182,8 @@ One design system (Tailwind v4 tokens in `src/index.css`, shadcn-style
 primitives in `src/components/ui/`), one typed client (`src/lib/api.ts` +
 `src/lib/imagingApi.ts`, same-origin by default — set `VITE_API_BASE_URL` only
 for a cross-origin API), and `src/lib/types.ts` mirroring `apps/api/schemas.py`.
-Route components live in `src/components/imaging/` and
-`src/components/session/`; dashboard components at `src/components/` top level.
+Route components live in `src/components/imaging/`, `src/components/session/`,
+and `src/components/demo/`; dashboard components at `src/components/` top level.
 The session route is lazy-loaded because CopilotKit + tiptap add ~2 MB, and
 carries its own `session.css`; other routes are pure Tailwind.
 

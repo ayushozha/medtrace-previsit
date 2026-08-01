@@ -86,3 +86,4 @@ data/local_mock/
 services/transcription/turn_01_patient.mp3
 services/transcription/walkthrough.md
 services/transcription/implementation_plan.md
+.gstack/

@@ -11,6 +11,11 @@ import { ImagingWorkspace } from './components/imaging/ImagingWorkspace';
 const SessionWorkspace = lazy(() =>
   import('./components/session/SessionWorkspace').then((m) => ({ default: m.SessionWorkspace })),
 );
+const YcMedplumHackathonDemo = lazy(() =>
+  import('./components/demo/YcMedplumHackathonDemo').then((m) => ({
+    default: m.YcMedplumHackathonDemo,
+  })),
+);
 
 function RouteFallback() {
   return (
@@ -46,6 +51,14 @@ export default function App() {
             element={
               <Suspense fallback={<RouteFallback />}>
                 <SessionWorkspace />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/yc-medplum-hackathon-demo"
+            element={
+              <Suspense fallback={<RouteFallback />}>
+                <YcMedplumHackathonDemo />
               </Suspense>
             }
           />
