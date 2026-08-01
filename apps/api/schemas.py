@@ -14,7 +14,8 @@ DocumentKind = Literal["clinical_pdf", "radiology_note", "conversation_note"]
 RiskLevel = Literal["High", "Medium", "Low"]
 LabStatus = Literal["High", "Normal", "Low", "Borderline"]
 TrendDirection = Literal["Worsening", "Improving", "Stable"]
-DocumentStatus = Literal["Processed", "Processing"]
+DocumentStatus = Literal["Processed", "Processing", "Failed"]
+VerificationStatus = Literal["verified", "unverified"]
 
 
 class PatientOut(BaseModel):
@@ -22,7 +23,7 @@ class PatientOut(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(..., description="chart_subjects.id (uuid)")
+    id: str = Field(..., description="Canonical Medplum Patient.id")
     zep_user_id: str
     name: str = Field(..., description="display name")
     age: int = 0
@@ -65,6 +66,7 @@ class DocumentOut(BaseModel):
     uploaded_at: str
     status: DocumentStatus = "Processed"
     review_status: str = "Needs review"
+    processing_error: str | None = None
 
 
 class IngestResult(BaseModel):
@@ -81,7 +83,7 @@ class ChatMessageOut(BaseModel):
 
 
 class ChatThreadOut(BaseModel):
-    id: str = Field(..., description="chat_sessions.id")
+    id: str = Field(..., description="Canonical Medplum Communication header id")
     zep_thread_id: str
     title: str | None = None
     created_at: str
@@ -99,6 +101,7 @@ class SendMessageIn(BaseModel):
 
     user_input: str
     deep: bool = False
+    request_id: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class SendMessageOut(BaseModel):
@@ -120,6 +123,8 @@ class LabTrendOut(BaseModel):
     date: str | None = None
     range: str | None = None
     source: str | None = None
+    verification_status: VerificationStatus | None = None
+    source_document_id: str | None = None
 
 
 class ConditionOut(BaseModel):
@@ -127,6 +132,8 @@ class ConditionOut(BaseModel):
     status: str = "Active"
     first_seen: str | None = None
     last_mentioned: str | None = None
+    verification_status: VerificationStatus | None = None
+    source_document_id: str | None = None
 
 
 class MedicationOut(BaseModel):
@@ -136,12 +143,16 @@ class MedicationOut(BaseModel):
     status: Literal["Active", "Previous"] = "Active"
     start: str | None = None
     end: str | None = None
+    verification_status: VerificationStatus | None = None
+    source_document_id: str | None = None
 
 
 class AllergyOut(BaseModel):
     allergen: str
     reaction: str | None = None
     source: str | None = None
+    verification_status: VerificationStatus | None = None
+    source_document_id: str | None = None
 
 
 class AbnormalFindingOut(BaseModel):
@@ -149,6 +160,8 @@ class AbnormalFindingOut(BaseModel):
     value: str
     status: str
     source: str | None = None
+    verification_status: VerificationStatus | None = None
+    source_document_id: str | None = None
 
 
 class AlertOut(BaseModel):

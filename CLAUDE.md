@@ -16,16 +16,17 @@ Clinical AI tooling in one monorepo: **one FastAPI service** and **one React app
 `services/transcription/` is a preserved prototype backing the `/session` route: a LangGraph
 backend (8010) behind a CopilotKit Express runtime (4000). It is **not** part of `npm run dev`.
 
-Depth references: `README.md`, `AGENTS.md` (layout + gotchas), `DBMS-design.md` (InsForge schema).
+Depth references: `README.md`, `AGENTS.md` (layout + gotchas), `DBMS-design.md` (canonical FHIR model).
 
 ## Commands
 
 | Script | Starts | Ports |
 |--------|--------|-------|
-| `npm run dev` | api + web | 8001, 3000 |
+| `npm run dev` | api + web + Zep projection worker | 8001, 3000 |
 | `npm run dev:api` | FastAPI only | 8001 |
 | `npm run dev:web` | Vite only | 3000 |
 | `npm run dev:transcription` | transcription backend + CopilotKit runtime | 8010, 4000 |
+| `npm run medplum:up` | Medplum server/admin + internal PostgreSQL/Redis | 8103, 3002 |
 
 ```bash
 npm run lint      # tsc --noEmit in apps/web
@@ -39,7 +40,7 @@ npm run test:py   # pytest -m "not integration"
 python -m venv .venv
 .venv/bin/pip install -e ".[dev,imaging]"   # imaging extra = pydicom/numpy/pillow
 npm install && npm --prefix apps/web ci
-cp .env.example .env                        # or set MEDTRACE_LOCAL_MOCK=1 to run offline
+cp .env.example .env                        # configure backend-only Medplum credentials
 ```
 
 Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MODEL_ID`);
@@ -48,7 +49,7 @@ Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MOD
 ### Tests
 
 ```bash
-.venv/bin/pytest -m "not integration"              # 49 tests
+.venv/bin/pytest -m "not integration"              # 61 tests
 .venv/bin/pytest tests/unit/test_rag_chat.py       # single file
 ```
 
@@ -68,53 +69,39 @@ Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MOD
 | `agents/deep_clinical.py` | **Deep path**: `create_deep_agent` (LangGraph) with Zep + PubMed tools, `MemorySaver` by `thread_id`. Non-diagnostic CDS framing. |
 | `zep/memory.py` | Zep client singleton, thread lifecycle, `fetch_thread_context`, `append_turn`. |
 | `zep/graph.py` | Read-only graph inspector → `list[dict]` rows (+ `rows_to_csv` for tool output). |
+| `medplum.py` | Backend-only OAuth client, FHIR CRUD/search/batch/transaction/Binary/pagination helpers. |
+| `medplum_repository.py` | Canonical FHIR repositories and existing DTO mappings. |
 | `ingest/documents.py`, `ingest/scan_extract.py` | PDF → text via VLM page images or `pypdf`; `chunk_for_zep` → `graph.add`. |
 | `ontology/clinical.py` | Clinical entity/edge ontology; `auto_apply_clinical_ontology` runs at API startup. |
 | `imaging/` | `storage.py` (study paths), `dicom.py` (preview render), `model_adapters/` (MedSAM2, report). |
-| `insforge_api.py` | InsForge Postgres + Storage registry. `@local_mock_fallback` routes each call to `local_store`. |
-| `local_store.py` | File-backed stand-in for InsForge (`MEDTRACE_LOCAL_MOCK=1`). |
+| `synthetic_fixtures.py` | Neutral committed fixtures and historical JSON import boundary. |
 | `fireworks_config.py` | `fireworks_chat_client(...)` — the **only** `ChatOpenAI` construction point. |
 | `env.py` | `load_repo_env()` — `.env` then `.env.local`, both with `override=True`. |
 | `patient_json.py`, `tracing.py` | Demo fixtures + derivations; Langtrace/LangSmith init. |
 
-**Zep model (central concept):** a patient is a Zep **user** (`zep_user_id`). Short dialog + rolling
-context lives on **threads**; durable episodes/facts/ontology live on the **graph**. New thread =
-new conversation, same user.
+**Ownership boundary:** Medplum is canonical for patients, structured facts, source documents, and
+transcripts. Zep is a permanent but derived AI-memory/knowledge projection. A Zep outage must not
+break canonical reads or lose writes; `Task` resources drive retries.
 
-**Ontology is a startup dependency.** `apps/api` calls `auto_apply_clinical_ontology()` in its
-lifespan hook. `routers/clinical.py` searches Zep by those custom node labels and edge types — if
-registration is skipped, every clinical endpoint returns an empty array with a 200. Re-apply
-manually with `scripts/apply_ontology.py`.
+**Zep ontology is an AI-feature dependency, not a dashboard dependency.** `apps/api` still calls
+`auto_apply_clinical_ontology()` for semantic tools, but Medplum-backed clinical endpoints read
+FHIR directly and remain available if ontology registration or Zep is unavailable.
 
 ### API (`apps/api/`, port 8001)
 
-Single-demo-profile mode: `INSFORGE_PROFILE_ID` (a `public.profiles.id` uuid) is required unless
-local mock is on. Routers: `patients`, `documents`, `threads`, `clinical`, `studies`.
-`GET /api/health` reports `insforge_configured`, `local_mock`, `fireworks_configured`,
-`zep_configured` and an `imaging` block. Clinical data routes 503 unless
-`require_insforge_enabled` passes; imaging routes never do (they degrade to mock).
+The clinical API always uses the `medplum_*` routers. Server-side
+`MEDPLUM_CLIENT_ID` and `MEDPLUM_CLIENT_SECRET` are required; never expose them through Vite.
+`GET /api/health` reports `medplum_configured`, `medplum_reachable`, and `zep_configured`.
 
-**No SQL mirror of clinical data.** `routers/clinical.py` derives every dashboard field
-per-request from Zep — ontology-scoped `graph.search` plus regex over episode text
-(`_LAB_HINT_PATTERNS`). InsForge only stores chart/document/session rows.
+Dashboard fields are now mapped deterministically from `Condition`, `MedicationStatement`,
+`AllergyIntolerance`, `Observation`, `Encounter`, `DocumentReference`, and `Provenance` in one
+FHIR batch. AI extracted facts remain tagged/unverified. `Binary` + `DocumentReference` own source
+files; header/child `Communication` resources own chat transcripts.
 
-**`GET /api/patients/{id}/snapshot` has two paths**: if `chart_subjects.metadata.clinical` exists it
-is validated straight into the response (skipping Zep); otherwise it falls back to the derived
-builders. Local-mock takes the first path.
+`GET /api/patients/{id}/snapshot` always uses the FHIR batch mapper.
 
 `/data` is mounted from repo-root `data/`, serving `data/studies/{id}/preview.png` and
 segmentation overlays. `data/studies/` is gitignored.
-
-### Local mock mode (`MEDTRACE_LOCAL_MOCK=1`)
-
-Runs the dashboard with **no InsForge and no Zep reads**:
-
-- `@local_mock_fallback` in `insforge_api.py` routes each persistence call to the same-named
-  `local_store` function — the two must stay signature-compatible.
-- State lives in `data/local_mock/store.json` (gitignored), auto-seeded from
-  `mock/patient_data/patient_*.json` plus clinical fixtures. `scripts/reset_local_mock.py` rebuilds it.
-- **Chat and ingest still call Zep and Fireworks** and fail without keys. Creating a thread calls
-  `ensure_user` first, so locally-seeded charts work against a real Zep project.
 
 ### Imaging model adapters (`src/medtrace_agent/imaging/model_adapters/`)
 

@@ -27,15 +27,16 @@ Rules:
 Do not skip the **Sources:** line when "Ingested clinical documents" is present."""
 
 
-def _zep_to_lc(messages: Sequence[ZepMessage]) -> list[BaseMessage]:
+def _zep_to_lc(messages: Sequence[ZepMessage | dict[str, object]]) -> list[BaseMessage]:
     out: list[BaseMessage] = []
     for m in messages:
-        role = m.role
-        name = m.name
+        role = str(m.get("role") or "") if isinstance(m, dict) else m.role
+        name = m.get("name") if isinstance(m, dict) else m.name
+        content = str(m.get("content") or "") if isinstance(m, dict) else m.content
         if role == "user":
-            out.append(HumanMessage(content=m.content, name=name))
+            out.append(HumanMessage(content=content, name=str(name) if name else None))
         elif role == "assistant":
-            out.append(AIMessage(content=m.content, name=name))
+            out.append(AIMessage(content=content, name=str(name) if name else None))
     return out
 
 
@@ -44,7 +45,7 @@ def chat_with_memory(
     user_input: str,
     user_display_name: str | None,
     zep_context: str,
-    thread_messages: Sequence[ZepMessage],
+    thread_messages: Sequence[ZepMessage | dict[str, object]],
     model_name: str,
     temperature: float = 0.6,
     api_key: str | None = None,

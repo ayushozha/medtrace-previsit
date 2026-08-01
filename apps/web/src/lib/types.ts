@@ -4,7 +4,8 @@ export type DocumentKind = 'clinical_pdf' | 'radiology_note' | 'conversation_not
 export type RiskLevel = 'High' | 'Medium' | 'Low';
 export type LabStatus = 'High' | 'Normal' | 'Low' | 'Borderline';
 export type TrendDirection = 'Worsening' | 'Improving' | 'Stable';
-export type DocumentStatus = 'Processed' | 'Processing';
+export type DocumentStatus = 'Processed' | 'Processing' | 'Failed';
+export type VerificationStatus = 'verified' | 'unverified';
 
 export interface Patient {
   id: string;
@@ -46,6 +47,7 @@ export interface DocumentRecord {
   uploaded_at: string;
   status: DocumentStatus;
   review_status: string;
+  processing_error?: string | null;
 }
 
 export interface IngestResult {
@@ -88,6 +90,8 @@ export interface LabTrend {
   date: string | null;
   range: string | null;
   source: string | null;
+  verification_status?: VerificationStatus | null;
+  source_document_id?: string | null;
 }
 
 export interface ConditionRecord {
@@ -95,6 +99,8 @@ export interface ConditionRecord {
   status: string;
   first_seen: string | null;
   last_mentioned: string | null;
+  verification_status?: VerificationStatus | null;
+  source_document_id?: string | null;
 }
 
 export interface MedicationRecord {
@@ -104,12 +110,16 @@ export interface MedicationRecord {
   status: 'Active' | 'Previous';
   start: string | null;
   end: string | null;
+  verification_status?: VerificationStatus | null;
+  source_document_id?: string | null;
 }
 
 export interface AllergyRecord {
   allergen: string;
   reaction: string | null;
   source: string | null;
+  verification_status?: VerificationStatus | null;
+  source_document_id?: string | null;
 }
 
 export interface AbnormalFinding {
@@ -117,6 +127,8 @@ export interface AbnormalFinding {
   value: string;
   status: string;
   source: string | null;
+  verification_status?: VerificationStatus | null;
+  source_document_id?: string | null;
 }
 
 export interface RiskAlert {

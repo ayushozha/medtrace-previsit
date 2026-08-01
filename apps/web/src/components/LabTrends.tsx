@@ -104,6 +104,11 @@ export function LabTrends({ labs }: LabTrendsProps) {
                     <td className="py-3">
                       <p className="font-semibold text-slate-800">{lab.test}</p>
                       <p className="mt-0.5 text-[10px] text-slate-400">{lab.date ?? ''}</p>
+                      {lab.verification_status === 'unverified' && (
+                        <span className="mt-1 inline-flex rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[9px] font-semibold text-amber-800">
+                          AI extracted — unverified
+                        </span>
+                      )}
                     </td>
                     <td className="py-3">
                       <span

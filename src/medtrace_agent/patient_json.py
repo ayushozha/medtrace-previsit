@@ -1,8 +1,8 @@
 """
 Structured patient definition for demo fixtures and seeding — parsed from JSON.
 
-This is **not** a clinical record or FHIR resource; it only drives Zep ``user_id``,
-display name, and optional demo metadata persisted on ``chart_subjects.metadata``.
+This is **not** a clinical record or FHIR resource; it is a committed synthetic seed
+shape converted into a Medplum ``Patient`` by the importer.
 
 Do not put real PHI in JSON or in the app.
 """
@@ -37,8 +37,7 @@ class PatientJson(BaseModel):
     Required for Zep + graph routing:
     - ``zep_user_id``: stable string used as Zep Cloud **User** id.
 
-    Optional InsForge ``chart_subjects.metadata`` stores the full normalized dict
-    (minus redundant top-level keys we store in columns).
+    The Medplum seed importer converts this data into FHIR fields and stable identifiers.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -106,13 +105,12 @@ def parse_patient_json(raw: str) -> PatientJson:
 
 
 def patient_metadata_blob(record: PatientJson) -> dict[str, Any]:
-    """Serialize patient fields suitable for ``chart_subjects.metadata`` (JSON object)."""
+    """Serialize the normalized synthetic seed fields as a JSON object."""
     d = record.model_dump(mode="json", exclude_none=True)
-    # Columns chart_subjects.zep_user_id / display_name duplicate; metadata keeps the rest + full snapshot.
     return d
 
 
-# ---- Demo-fixture derivations (shared by local_store seeding and scripts/) ----
+# ---- Demo-fixture derivations used by Medplum seeding -----------------------
 
 
 def derive_age(age_band: str | None, *, default: int = 45) -> int:

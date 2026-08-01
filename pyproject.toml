@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "medtrace-agent"
 version = "0.2.0"
-description = "Zep-backed clinical memory service with LangChain agents (RAG + Deep Agent)"
+description = "Medplum-backed clinical decision-support service with Zep AI memory"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

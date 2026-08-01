@@ -13,11 +13,10 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
 
 - **`apps/api/`** (`apps.api.main:app`, port 8001) — one service, two concerns:
   - *Clinical*: patients, documents, chat threads, and derived clinical views
-    backed by Zep Cloud (long-term memory + temporal knowledge graph), Fireworks
-    AI (LLM + VLM) and InsForge (Postgres + Storage). Needs `ZEP_API_KEY`,
-    `FIREWORKS_API_KEY` and `INSFORGE_*`, **or** `MEDTRACE_LOCAL_MOCK=1` for an
-    offline file-backed data layer. Clinical data routes return 503 without
-    either.
+    use **Medplum FHIR R4 as the canonical store**. Zep Cloud is a permanent
+    derived AI-memory/knowledge projection and Fireworks AI supplies LLM/VLM
+    calls. Clinical routes need backend-only Medplum client credentials; Zep
+    outages do not block canonical dashboard reads or lose documents/messages.
   - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Qwen VL via
     Nebius). **Runs fully in mock mode with no secrets** — the easiest path to a
     working end-to-end demo.
@@ -29,8 +28,8 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
   separately with `npm run dev:transcription`; uses **OpenAI directly**
   (`OPENAI_API_KEY`, Whisper + `tts-1`), not Fireworks.
 
-Depth references: `README.md` (Zep/ingest flows), `CLAUDE.md` (architecture +
-gotchas), `DBMS-design.md` (InsForge Postgres schema).
+Depth references: `README.md` (Medplum/Zep flows), `CLAUDE.md` (architecture +
+gotchas), `DBMS-design.md` (canonical FHIR model).
 
 ### Monorepo layout
 
@@ -40,12 +39,12 @@ apps/
   web/               React/Vite UI — all three product surfaces (3000)
 services/
   transcription/     Voice/CopilotKit prototype (backend 8010, runtime 4000)
-src/medtrace_agent/  Shared package (Zep, ingest, agents, imaging, InsForge, ontology)
+src/medtrace_agent/  Shared package (Medplum, Zep, ingest, agents, imaging, ontology)
 tests/               Pytest suite (top-level files + tests/unit/)
-migrations/          InsForge SQL migrations (schema, RLS, metadata, demo-mode)
-mock/patient_data/   Mock patient JSON fixtures (seed source for local mock)
-data/                Runtime data (local_mock store, notes, studies; mostly gitignored)
-scripts/             Ontology apply, note ingest, seeding, local-mock reset, model probe
+infra/medplum/       Local pinned Medplum/PostgreSQL/Redis Compose stack
+mock/patient_data/   Synthetic JSON fixtures converted to FHIR by the Medplum seed command
+data/                Runtime data (historical imports, notes, studies; mostly gitignored)
+scripts/             Medplum bootstrap/seed, Zep projection, note ingest, model probe
 ```
 
 ## Setup, build and run
@@ -60,7 +59,8 @@ python -m venv .venv
 npm install                    # root helper (concurrently)
 npm --prefix apps/web ci
 
-cp .env.example .env           # fill secrets, or set MEDTRACE_LOCAL_MOCK=1
+cp .env.example .env           # configure backend-only Medplum credentials
+npm run medplum:up             # admin :3002, FHIR/OAuth :8103
 ```
 
 `requirements.txt` is just `-e .[dev,imaging]` with comments — the editable
@@ -74,10 +74,11 @@ Prefer the root `package.json` scripts over re-deriving commands.
 
 | Script | Starts | Ports |
 |--------|--------|-------|
-| `npm run dev` | api + web | 8001, 3000 |
+| `npm run dev` | api + web + Medplum→Zep worker | 8001, 3000 |
 | `npm run dev:api` | FastAPI only | 8001 |
 | `npm run dev:web` | Vite only | 3000 |
 | `npm run dev:transcription` | transcription backend + CopilotKit runtime | 8010, 4000 |
+| `npm run medplum:up` | Medplum server + admin app; internal Postgres/Redis | 8103, 3002 |
 
 Running the backend manually:
 
@@ -88,7 +89,7 @@ Running the backend manually:
 ## Tests, lint, type checks
 
 - Python: `.venv/bin/pytest -m "not integration"` (or `npm run test:py`) —
-  currently 49 passed, 2 deselected. The `integration` marker hits the live NCBI
+  currently 61 passed, 2 deselected. The `integration` marker hits the live NCBI
   PubMed API and needs network. `pyproject.toml` sets `pythonpath = ["src"]` and
   `testpaths = ["tests"]` (this keeps collection out of `services/`, where
   `test_transcribe.py` is a manual asyncio script, not a pytest module).
@@ -113,28 +114,27 @@ Running the backend manually:
 | `agents/deep_clinical.py` | **Deep path**: `create_deep_agent` (LangGraph, `deepagents` package) with Zep + PubMed tools, `MemorySaver` keyed by `thread_id`. |
 | `zep/memory.py` | Zep client singleton, thread lifecycle, `fetch_thread_context`, `append_turn`. |
 | `zep/graph.py` | Read-only graph inspector → `list[dict]` rows; `rows_to_csv` for LLM tool output. |
+| `medplum.py` | OAuth token cache and FHIR read/search/upsert/bundle/Binary/pagination primitives. |
+| `medplum_repository.py` | FHIR-domain repositories and existing snake_case DTO mappings. |
+| `medplum_extraction.py` | Validated typed facts for unverified FHIR resource creation. |
 | `ingest/documents.py`, `ingest/scan_extract.py` | PDF → text (VLM page images or `pypdf`), `chunk_for_zep` → `graph.add(type="text")`. |
 | `ontology/clinical.py` | Clinical entity/edge ontology; `auto_apply_clinical_ontology` runs at API startup. |
 | `imaging/` | `storage.py` (study paths), `dicom.py` (preview render), `model_adapters/` (MedSAM2 + report). |
 | `integrations/pubmed.py` | NCBI E-utilities (`esearch`/`esummary` JSON, not scraping). |
-| `insforge_api.py` | InsForge registry; `@local_mock_fallback` routes each call to `local_store` when local mock is on. |
-| `local_store.py` | File-backed InsForge stand-in (`data/local_mock/store.json` + `files/`). |
+| `synthetic_fixtures.py` | Neutral committed fixtures and historical JSON import boundary. |
 | `fireworks_config.py` | `fireworks_chat_client(...)` — the single `ChatOpenAI` construction point. |
 | `env.py` | `load_repo_env()` — loads `.env` then `.env.local`, both `override=True`. |
 | `patient_json.py`, `tracing.py` | Demo fixtures + `derive_age`/`derive_primary_doctor`; Langtrace/LangSmith init. |
 
-**Zep model (central concept):** a patient is a Zep **user** (`zep_user_id`).
-Short dialog + rolling context lives on **threads** (`thread.get_user_context`,
-`thread.get`, `thread.add_messages`); durable episodes/facts/ontology live on the
-**graph** (`graph.add`, `graph.search`, `graph.set_ontology`). New thread = new
-conversation, same user.
+**Clinical ownership (central concept):** Medplum owns patients, structured
+facts, source files, and transcripts. `zep_user_id` and `zep_thread_id` survive
+as stable FHIR identifiers. Zep holds only a derived semantic projection, with
+retry work represented as durable Medplum `Task` resources.
 
-**Ontology is a startup dependency.** `apps/api` applies it in its lifespan hook
-(`AUTO_APPLY_ZEP_ONTOLOGY=true` by default); `routers/clinical.py` searches by
-those custom node labels and edge types. Skip registration and the clinical
-endpoints return empty arrays with a 200 — a silent failure. Ontology failures
-are logged, not raised, so imaging + health still come up without Zep.
-`scripts/apply_ontology.py` re-applies it manually.
+**Zep ontology is an AI-feature dependency, not a dashboard dependency.** `apps/api` applies it in its lifespan hook
+(`AUTO_APPLY_ZEP_ONTOLOGY=true` by default) for semantic agent tools. Ontology
+failures are logged, not raised; canonical FHIR clinical endpoints, imaging, and
+health still work without Zep. `scripts/apply_ontology.py` re-applies it manually.
 
 **LLM layer:** every call goes through `fireworks_chat_client()` against an
 **OpenAI-compatible** endpoint — Fireworks AI by default (`FIREWORKS_BASE_URL`,
@@ -147,21 +147,16 @@ model id, and key) — including a self-hosted vLLM server.
 
 ### API (`apps/api/`)
 
-Single-demo-profile mode: `INSFORGE_PROFILE_ID` (a `public.profiles.id` uuid) is
-required unless local mock is on. Routers: `patients`, `documents`, `threads`,
-`clinical`, `studies`. `GET /api/health` reports `insforge_configured`,
-`local_mock`, `fireworks_configured`, `zep_configured`, `demo_profile_id_set`
-and an `imaging` block. Clinical data routes 503 without InsForge/local-mock;
-imaging routes never do (they degrade to mock). Repo-root `data/` is mounted at
-`/data` for study previews and mask overlays.
+Clinical routes always use the `medplum_*` routers. `GET /api/health` reports
+`medplum_configured`, `medplum_reachable`, and `zep_configured`. The browser
+never receives the client secret. Imaging routes are unchanged and never depend
+on clinical persistence.
 
-**No SQL mirror of clinical data** — `routers/clinical.py` derives conditions,
-medications, labs, alerts and timeline per request from Zep (ontology search
-plus regex over episode text). InsForge only stores chart/document/session rows.
-Schema in `migrations/*.sql`; seed with `scripts/seed_mock_patients.py`.
-`GET /api/patients/{id}/snapshot` has two paths: a stored
-`chart_subjects.metadata.clinical` payload is validated straight into the
-response (local-mock path); otherwise it falls back to the derived Zep builders.
+Dashboard reads batch `Condition`, `MedicationStatement`, `AllergyIntolerance`,
+`Observation`, `Encounter`, `DocumentReference`, `Provenance`, and `Task` and
+map them deterministically. Uploads persist `Binary` + `DocumentReference`
+before extraction; generated facts are tagged unverified. Canonical chat uses
+parent/child `Communication` resources and conditional request identifiers.
 
 ### Imaging model adapters (`src/medtrace_agent/imaging/model_adapters/`)
 
@@ -217,13 +212,6 @@ Vite is serving in ~200 ms while the API needs a second or two to listen.
   `curl http://localhost:3000`, not `127.0.0.1`.
 - **`.env` inline comments break values** — dotenv treats `KEY=value  # note`
   as part of the value.
-- **`local_store` twins**: every `@local_mock_fallback` function in
-  `insforge_api.py` dispatches by name to `local_store`. Adding one without its
-  signature-matching twin raises `AttributeError` only under
-  `MEDTRACE_LOCAL_MOCK=1`.
-- **Local mock still calls Zep/Fireworks for chat + ingest** — only the
-  InsForge persistence layer is faked. Chat fails without keys even in mock
-  mode.
 - **A sample DICOM for testing uploads** ships with pydicom:
   `.venv/bin/python -c "import pydicom.data,os;print(os.path.join(os.path.dirname(pydicom.data.__file__),'test_files','MR_small.dcm'))"`
 - **Vision ingest cost**: one multimodal LLM call per PDF page. Cap with the
@@ -242,11 +230,11 @@ Vite is serving in ~200 ms while the API needs a second or two to listen.
 ## Security considerations
 
 - **Never commit secrets.** `.env` is gitignored; `.env.example` holds
-  placeholders only. `INSFORGE_API_KEY` is server-side only — never expose it in
-  frontend bundles (the frontend uses the public anon key). Same for
+  placeholders only. `MEDPLUM_CLIENT_SECRET` is server-side only — never expose it in
+  frontend bundles. The same applies to
   `FIREWORKS_API_KEY`, `ZEP_API_KEY`, `NEBIUS_API_KEY`, `OPENAI_API_KEY`.
-- **Patient-data hygiene**: `data/` (local mock store, uploaded studies, notes)
-  is largely gitignored on purpose — `data/studies/`, `data/local_mock/`,
+- **Patient-data hygiene**: `data/` (historical imports, uploaded studies, notes)
+  is largely gitignored on purpose — `data/studies/`, historical import folders,
   `data/**/*.pdf|.txt|.png|.jpg`. Do not commit real or realistic patient data;
   `data/studies/` in particular holds uploaded DICOM/images. The committed
   fixtures in `mock/patient_data/` are synthetic (no PHI).

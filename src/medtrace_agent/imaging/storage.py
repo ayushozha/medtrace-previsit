@@ -1,7 +1,7 @@
 """On-disk layout for imaging studies.
 
 Single source of truth for where study files live. Everything sits under the repo-root
-``data/`` directory alongside the other data folders (``data/local_mock``,
+``data/`` directory alongside the other data folders (historical imports,
 ``data/radiology_note``, …) and is served by FastAPI at ``/data``.
 
     data/studies/{study_id}/preview.png

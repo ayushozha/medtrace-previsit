@@ -202,6 +202,7 @@ function DashboardBody({
                     <div key={condition.name} className="rounded-md bg-slate-100 px-2 py-1.5">
                       <p className="text-xs font-semibold text-slate-800">{condition.name}</p>
                       <p className="text-[10px] text-slate-500">{condition.first_seen ?? condition.status}</p>
+                      <VerificationBadge status={condition.verification_status} />
                     </div>
                   ))
                 ) : (
@@ -219,6 +220,7 @@ function DashboardBody({
                         <p className="text-[10px] text-slate-500">
                           {medication.dose ?? '?'} - {medication.frequency ?? '?'}
                         </p>
+                        <VerificationBadge status={medication.verification_status} />
                       </div>
                     ))
                 ) : (
@@ -237,7 +239,8 @@ function DashboardBody({
                         {allergy.allergen}
                         {allergy.reaction ? `: ${allergy.reaction}` : ''}
                       </p>
-                      <p className="text-[10px] text-red-500">Source: {allergy.source ?? 'Zep memory'}</p>
+                      <p className="text-[10px] text-red-500">Source: {allergy.source ?? 'FHIR chart'}</p>
+                      <VerificationBadge status={allergy.verification_status} />
                     </div>
                   ))
                 ) : (
@@ -258,7 +261,8 @@ function DashboardBody({
                           {finding.value}
                         </span>
                       </div>
-                      <p className="mt-1 text-[10px] text-yellow-800">{finding.source ?? 'Zep memory'}</p>
+                      <p className="mt-1 text-[10px] text-yellow-800">{finding.source ?? 'FHIR chart'}</p>
+                      <VerificationBadge status={finding.verification_status} />
                     </div>
                   ))
                 ) : (
@@ -326,7 +330,10 @@ function DashboardBody({
                     {snapshot.current_medications.length > 0 ? (
                       snapshot.current_medications.map((medication) => (
                         <tr key={medication.name} className="border-b border-slate-50 last:border-0">
-                          <td className="py-3 font-semibold text-slate-800">{medication.name}</td>
+                          <td className="py-3 font-semibold text-slate-800">
+                            {medication.name}
+                            <VerificationBadge status={medication.verification_status} />
+                          </td>
                           <td className="py-3 text-slate-600">{medication.dose ?? '-'}</td>
                           <td className="py-3">
                             <span
@@ -468,6 +475,15 @@ function SnapshotCard({
 
 function SnapshotEmpty({ text = 'No data yet' }: { text?: string }) {
   return <p className="rounded-md bg-slate-50 px-2 py-1.5 text-[11px] text-slate-400">{text}</p>;
+}
+
+function VerificationBadge({ status }: { status?: 'verified' | 'unverified' | null }) {
+  if (status !== 'unverified') return null;
+  return (
+    <span className="mt-1 inline-flex rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[9px] font-semibold text-amber-800">
+      AI extracted — unverified
+    </span>
+  );
 }
 
 function EmptyMessage({ text }: { text: string }) {

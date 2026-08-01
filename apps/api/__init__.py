@@ -1,4 +1,4 @@
-"""Medtrace FastAPI service: bridges the React frontend to Zep + InsForge.
+"""Medtrace FastAPI service: canonical Medplum FHIR with Zep AI projection.
 
 Run with::
 
