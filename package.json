@@ -12,6 +12,7 @@
     "medplum:down": "docker compose -f infra/medplum/docker-compose.yml down",
     "medplum:logs": "docker compose -f infra/medplum/docker-compose.yml logs -f medplum-server medplum-app",
     "medplum:bootstrap": "python scripts/medplum_bootstrap.py",
+    "medplum:dev-account": "python scripts/medplum_dev_account.py",
     "medplum:seed": "python scripts/seed_medplum.py",
     "dev:transcription": "concurrently -k -n tr-api,tr-copilot -c yellow,red \"npm:dev:transcription-api\" \"npm:dev:transcription-copilot\"",
     "dev:transcription-api": "python -m uvicorn main:app --app-dir services/transcription/backend --host 127.0.0.1 --port 8010 --reload",

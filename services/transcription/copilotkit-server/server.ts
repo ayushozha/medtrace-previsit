@@ -14,10 +14,17 @@ app.use(cors({
   credentials: true,
 }));
 
+const agentBase = process.env.AGENT_URL || "http://localhost:8010";
+
 const runtime = new CopilotRuntime({
   agents: {
+    // /session document co-editor — leave behavior unchanged
     predictive_state_updates: new LangGraphHttpAgent({
-      url: process.env.AGENT_URL || "http://localhost:8010",
+      url: agentBase,
+    }),
+    // /patients/:id checklist collaboration (additive)
+    dashboard_clinical: new LangGraphHttpAgent({
+      url: `${agentBase.replace(/\/$/, "")}/dashboard`,
     }),
   },
 });

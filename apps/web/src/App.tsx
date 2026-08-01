@@ -1,15 +1,20 @@
 import { Suspense, lazy } from 'react';
 import { Loader2 } from 'lucide-react';
-import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { AppNav } from './components/AppNav';
-import { DashboardHome } from './components/DashboardHome';
+import { LandingPage } from './components/LandingPage';
 import { MainDashboard } from './components/MainDashboard';
 import { ImagingWorkspace } from './components/imaging/ImagingWorkspace';
 
-// CopilotKit + tiptap pull in ~2 MB of syntax-highlighting and diagram code. Loading the
-// session route on demand keeps that out of the patients and imaging bundles.
+// CopilotKit pulls in a heavy runtime. Lazy-load session + patient-chart collab so
+// the directory and imaging routes stay light.
 const SessionWorkspace = lazy(() =>
   import('./components/session/SessionWorkspace').then((m) => ({ default: m.SessionWorkspace })),
+);
+const PatientChartWorkspace = lazy(() =>
+  import('./components/dashboard/PatientChartWorkspace').then((m) => ({
+    default: m.PatientChartWorkspace,
+  })),
 );
 const YcMedplumHackathonDemo = lazy(() =>
   import('./components/demo/YcMedplumHackathonDemo').then((m) => ({
@@ -30,21 +35,22 @@ function PatientDirectoryRoute() {
   return <MainDashboard onSelectPatient={(id) => navigate(`/patients/${id}`)} />;
 }
 
-function PatientChartRoute() {
-  const { patientId } = useParams<{ patientId: string }>();
-  const navigate = useNavigate();
-  if (!patientId) return <Navigate to="/" replace />;
-  return <DashboardHome patientId={patientId} onBack={() => navigate('/')} />;
-}
-
 export default function App() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <AppNav />
       <main>
         <Routes>
-          <Route path="/" element={<PatientDirectoryRoute />} />
-          <Route path="/patients/:patientId" element={<PatientChartRoute />} />
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/patients" element={<PatientDirectoryRoute />} />
+          <Route
+            path="/patients/:patientId"
+            element={
+              <Suspense fallback={<RouteFallback />}>
+                <PatientChartWorkspace />
+              </Suspense>
+            }
+          />
           <Route path="/imaging" element={<ImagingWorkspace />} />
           <Route
             path="/session"

@@ -158,3 +158,184 @@
     @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold leading-none;
   }
 }
+
+@keyframes modern-enter {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes modern-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes modern-orbit {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(30px, -22px, 0) scale(1.08);
+  }
+}
+
+@keyframes modern-marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes modern-wave {
+  0%, 100% { height: 14%; opacity: 0.55; }
+  45% { height: 86%; opacity: 1; }
+  70% { height: 35%; opacity: 0.75; }
+}
+
+@keyframes modern-scan {
+  0%, 100% { transform: translateY(-90px); opacity: 0; }
+  15%, 85% { opacity: 0.8; }
+  50% { transform: translateY(100px); opacity: 1; }
+}
+
+.modern-landing {
+  isolation: isolate;
+  color-scheme: dark;
+}
+
+.modern-display {
+  font-family: 'Avenir Next', Avenir, 'Helvetica Neue', sans-serif;
+}
+
+.modern-hero {
+  --pointer-x: 50%;
+  --pointer-y: 20%;
+  background:
+    radial-gradient(circle at 50% -5%, rgba(82, 111, 255, 0.16), transparent 35%),
+    linear-gradient(180deg, #050912 0%, #070d18 64%, #050912 100%);
+}
+
+.modern-hero-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.032) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+.modern-pointer-glow {
+  background: radial-gradient(430px circle at var(--pointer-x) var(--pointer-y), rgba(59, 130, 246, 0.1), transparent 68%);
+}
+
+.modern-orb {
+  pointer-events: none;
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  animation: modern-orbit 13s ease-in-out infinite;
+}
+
+.modern-orb-one {
+  right: 4%;
+  top: 13%;
+  height: 260px;
+  width: 260px;
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.modern-orb-two {
+  bottom: 18%;
+  left: 3%;
+  height: 320px;
+  width: 320px;
+  background: rgba(82, 111, 255, 0.09);
+  animation-delay: -6s;
+}
+
+.modern-enter {
+  animation: modern-enter 750ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.modern-panel-enter {
+  animation: modern-panel-enter 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.modern-gradient-text {
+  color: transparent;
+  background: linear-gradient(100deg, #ffffff 10%, #bfdbfe 45%, #3b82f6 88%);
+  background-clip: text;
+  -webkit-background-clip: text;
+}
+
+.modern-primary-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.modern-primary-button::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-120%) skewX(-20deg);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  transition: transform 650ms ease;
+}
+
+.modern-primary-button:hover::after {
+  transform: translateX(120%) skewX(-20deg);
+}
+
+.modern-signal-track {
+  animation: modern-marquee 28s linear infinite;
+}
+
+.modern-bento::before {
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.045), transparent 38%);
+}
+
+.modern-wave-bar {
+  height: 20%;
+  animation: modern-wave 1.45s ease-in-out infinite;
+  animation-delay: calc(var(--bar-index) * -57ms);
+}
+
+.modern-scan-line {
+  animation: modern-scan 4s ease-in-out infinite;
+}
+
+@media (hover: none) {
+  .modern-pointer-glow {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .modern-hero-grid {
+    background-size: 40px 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modern-enter,
+  .modern-panel-enter,
+  .modern-orb,
+  .modern-signal-track,
+  .modern-wave-bar,
+  .modern-scan-line {
+    animation: none;
+  }
+}

@@ -13,11 +13,11 @@ One FastAPI service and one React app, sharing the `src/medtrace_agent/` Python 
 | Surface | Path | Port |
 |---------|------|------|
 | API (clinical + imaging) | `apps/api/` (`apps.api.main:app`) | 8001 |
-| Web app | `apps/web/` — `/`, `/patients/:patientId`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
+| Web app | `apps/web/` — `/`, `/patients`, `/patients/:id`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
 | Voice prototype | `services/transcription/` (optional; backs `/session`) | 8010 + 4000 |
 
 - **Clinical** — **Medplum FHIR R4 is the only clinical store** for patients, clinical facts, source documents, and transcripts. **Zep Cloud** is a permanent derived AI-memory/knowledge projection; **Fireworks AI** supplies LLM/VLM calls.
-- **Imaging** — DICOM upload, MedSAM2 segmentation, draft reports. **Runs fully in mock mode with no secrets** — easiest path to an end-to-end demo.
+- **Imaging** — DICOM upload, MedSAM2 segmentation, draft reports via Fireworks VL. Segmentation still mocks without MedSAM2; reports mock only if `FIREWORKS_API_KEY` is unset.
 
 **Topics:** clinical AI · pre-visit intake · evidence provenance · FHIR R4 · eligibility and benefits · human-in-the-loop review
 
@@ -59,9 +59,11 @@ npm --prefix apps/web ci
 Copy-Item .env.example .env
 # Start Medplum, create a project + ClientApplication at http://localhost:3002,
 # then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
+# Medplum UI login: admin@example.com / medplum_admin (or npm run medplum:dev-account).
 
 npm run medplum:up
 npm run medplum:bootstrap
+npm run medplum:dev-account
 npm run medplum:seed
 
 npm run dev          # api :8001, web :3000
@@ -81,9 +83,11 @@ cp .env.example .env
 # Start Medplum, create a project + ClientApplication at http://localhost:3002,
 # then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
 # Imaging works without secrets (deterministic mock).
+# Medplum UI login: admin@example.com / medplum_admin (or npm run medplum:dev-account).
 
 npm run medplum:up
 npm run medplum:bootstrap
+npm run medplum:dev-account
 npm run medplum:seed
 npm run dev          # api :8001, web :3000
 ```
@@ -95,7 +99,7 @@ npm run dev          # api :8001, web :3000
 | `npm run dev:web` | Vite only |
 | `npm run dev:transcription` | voice backend (8010) + CopilotKit runtime (4000) |
 | `npm run medplum:up` / `medplum:down` / `medplum:logs` | pinned local Medplum stack |
-| `npm run medplum:bootstrap` / `medplum:seed` | verify credentials / idempotently import synthetic fixtures |
+| `npm run medplum:bootstrap` / `medplum:dev-account` / `medplum:seed` | verify credentials / fake UI login / import fixtures |
 | `npm run lint` / `npm run build` | TypeScript check / Vite build (`apps/web`) |
 | `npm run test:py` | `python -m pytest -m "not integration"` in the activated venv |
 
@@ -305,7 +309,7 @@ flowchart TB
 
 ### Imaging
 
-`MedSAM2Service` / report adapters resolve in order: **HTTP endpoint** → **local adapter** → **deterministic mock**. Reports use Qwen VL via Nebius only when both `NEBIUS_API_KEY` and env-driven `NEBIUS_QWEN_VL_MODEL` are set; a partial pair fails visibly instead of silently falling back. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
+`MedSAM2Service` / report adapters resolve in order: **Fireworks VL** (`FIREWORKS_API_KEY`) → **HTTP endpoint** → **local adapter** → **deterministic mock**. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
 
 Sample DICOM for uploads (ships with pydicom):
 
@@ -417,10 +421,10 @@ See **`.env.example`** for every variable. Comments must be on their own lines �
 | **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET` |
 | **PDF caps** | `PDF_VL_MAX_PAGES`, `PDF_VL_DPI` |
 | **PubMed** | `NCBI_EMAIL`, `NCBI_API_KEY` (optional) |
-| **Voice `/session`** | `GEMINI_API_KEY` (transcription); `OPENAI_*` for report agent / TTS (can point at Fireworks for chat) |
-| **Imaging draft** | `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and `NEBIUS_QWEN_VL_MODEL` are an all-or-nothing pair/path |
+| **Voice `/session`** | `DEEPGRAM_API_KEY` (Nova STT + Aura TTS); `OPENAI_*` for report agent (can point at Fireworks) |
+| **Imaging draft** | `FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL` (same VL model as PDF ingest) |
 | **YC demo workflow** | `YC_DEMO_PATIENT_ID`, distinct 32+ character `YC_DEMO_CHECKIN_SIGNING_KEY` and `YC_DEMO_ACCESS_TOKEN`, plus server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME` |
-| **Deepgram** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
+| **Deepgram (YC demo)** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
 | **Moss** | `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `MOSS_INDEX_NAME`, `MOSS_MODEL_ID`, required `MOSS_DISABLE_TELEMETRY=1`; endpoint overrides must be unset |
 | **OpenAI demo extraction** | `OPENAI_API_KEY`, `OPENAI_MODEL`; leave `OPENAI_BASE_URL` empty for OpenAI |
 | **Medplum demo Patient** | `YC_DEMO_PATIENT_ID` plus the exact synthetic/demo/Stedi tags and Zep identifier created by the provisioner |

@@ -18,6 +18,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 from copilotkit import LangGraphAGUIAgent  # noqa: E402
 from ag_ui_langgraph import add_langgraph_fastapi_endpoint  # noqa: E402
 from agent import graph  # noqa: E402
+from dashboard_agent import dashboard_graph  # noqa: E402
 from voice_handler import VoicePipeline  # noqa: E402
 from database import save_session, get_all_sessions, update_session_report  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -36,7 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add the LangGraph AG-UI endpoint
+# Session document co-editor (unchanged)
 add_langgraph_fastapi_endpoint(
     app=app,
     agent=LangGraphAGUIAgent(
@@ -45,6 +46,17 @@ add_langgraph_fastapi_endpoint(
         graph=graph,
     ),
     path="/",
+)
+
+# Patient-dashboard checklist collaboration (additive; does not alter session agent)
+add_langgraph_fastapi_endpoint(
+    app=app,
+    agent=LangGraphAGUIAgent(
+        name="dashboard_clinical",
+        description="Patient dashboard checklist collaboration agent",
+        graph=dashboard_graph,
+    ),
+    path="/dashboard",
 )
 
 class SaveSessionRequest(BaseModel):
@@ -67,7 +79,7 @@ async def save_session_endpoint(request: SaveSessionRequest):
         # Decode base64 audio
         audio_data = base64.b64decode(request.audio_base64.split(",")[-1])
 
-        # Transcribe using Whisper
+        # Transcribe using Deepgram Nova (+ diarization)
         pipeline = VoicePipeline()
         transcript = await pipeline.transcribe_audio(audio_data)
 

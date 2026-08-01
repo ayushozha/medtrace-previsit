@@ -362,7 +362,7 @@ class DemoReadinessOut(BaseModel):
 
 # ---- Imaging (DICOM studies, segmentation, draft reports) --------------------
 
-ReportSource = Literal["mock", "medgemma", "qwen-vl"]
+ReportSource = Literal["mock", "medgemma", "fireworks-vl", "qwen-vl"]
 
 
 class RoiPrompt(BaseModel):
@@ -372,6 +372,14 @@ class RoiPrompt(BaseModel):
     y: float = Field(ge=0, le=1)
     width: float = Field(gt=0, le=1)
     height: float = Field(gt=0, le=1)
+    #: Slice the box was drawn on. None means the middle slice — the pre-volumetric
+    #: behaviour, kept so old clients and single-image studies need no changes.
+    slice_index: int | None = Field(default=None, ge=0)
+    #: Intensity window (HU) MedSAM2 normalises to 0–255 before inference — normally the
+    #: viewer's window/level. Without it the model sees the full data range flattened and
+    #: over-segments; the backend falls back to the DICOM WindowCenter/Width when unset.
+    window_lower: float | None = None
+    window_upper: float | None = None
 
 
 class StudyOut(BaseModel):
@@ -408,7 +416,19 @@ class SegmentationOut(BaseModel):
     # `mock` means no model ran — the box is the caller's own prompt echoed back.
     source: Literal["medsam2", "mock"]
     box: RoiPrompt
+    #: Overlay for the prompt slice (or the whole image on the legacy 2D path).
     overlay_url: str | None = None
+    # Volumetric fields — populated only when the study is a multi-slice series.
+    prompt_slice: int | None = None
+    #: Raw uint8 mask bytes, C-order, exactly ``mask_shape`` voxels — the viewer loads
+    #: this whole as a Cornerstone3D labelmap.
+    mask_url: str | None = None
+    #: [depth, rows, cols]
+    mask_shape: list[int] | None = None
+    #: [dz, dy, dx] in mm
+    voxel_spacing_mm: list[float] | None = None
+    #: Indexed by slice; None where the mask is empty on that slice.
+    slice_overlay_urls: list[str | None] = Field(default_factory=list)
 
 
 class ReportRequest(BaseModel):

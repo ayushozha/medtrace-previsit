@@ -15,6 +15,8 @@ import { Timeline } from './Timeline';
 import { LabTrends } from './LabTrends';
 import { DocumentLibrary } from './DocumentLibrary';
 import { AIChatPanel } from './AIChatPanel';
+import { DashboardCollabLayer } from './dashboard/DashboardCollabLayer';
+import { useDashboardCollab } from './dashboard/DashboardCollabContext';
 import { useSnapshot } from '@/hooks/useSnapshot';
 import type { ClinicalSnapshot, RiskLevel } from '@/lib/types';
 
@@ -23,6 +25,8 @@ interface DashboardHomeProps {
   onBack?: () => void;
   headerAction?: React.ReactNode;
   suggestedPrompts?: string[];
+  /** When true, expects a parent CopilotKit provider (PatientChartWorkspace). */
+  collabMode?: boolean;
 }
 
 const priorityClass: Record<RiskLevel, string> = {
@@ -31,7 +35,13 @@ const priorityClass: Record<RiskLevel, string> = {
   Low: 'border-slate-200 bg-slate-50 text-slate-700',
 };
 
-export function DashboardHome({ patientId, onBack, headerAction, suggestedPrompts }: DashboardHomeProps) {
+export function DashboardHome({
+  patientId,
+  onBack,
+  headerAction,
+  suggestedPrompts,
+  collabMode = false,
+}: DashboardHomeProps) {
   const { snapshot, loading, error, refresh } = useSnapshot(patientId);
 
   if (loading && !snapshot) {
@@ -61,7 +71,7 @@ export function DashboardHome({ patientId, onBack, headerAction, suggestedPrompt
     return <FullScreenStatus icon={<TriangleAlert size={20} />} text="Patient not found." onBack={onBack} />;
   }
 
-  return (
+  const body = (
     <DashboardBody
       snapshot={snapshot}
       onBack={onBack}
@@ -69,6 +79,14 @@ export function DashboardHome({ patientId, onBack, headerAction, suggestedPrompt
       headerAction={headerAction}
       suggestedPrompts={suggestedPrompts}
     />
+  );
+
+  if (!collabMode) return body;
+
+  return (
+    <DashboardCollabLayer snapshot={snapshot} onRefresh={() => void refresh()}>
+      {body}
+    </DashboardCollabLayer>
   );
 }
 
@@ -94,7 +112,8 @@ function DashboardBody({
     ['DOB', patient.dob ?? '-'],
   ];
 
-  // Interactive review checklist, keyed by item text so a snapshot refresh keeps state.
+  // Local checklist fallback when CopilotKit collab is not mounted.
+  const collab = useDashboardCollab();
   const [checkedItems, setCheckedItems] = useState<ReadonlySet<string>>(new Set());
   const toggleChecklistItem = (item: string) => {
     setCheckedItems((prev) => {
@@ -107,6 +126,11 @@ function DashboardBody({
       return next;
     });
   };
+
+  const focusKey = collab?.focus?.key?.toLowerCase() ?? '';
+  const focusType = collab?.focus?.type;
+  const isFocused = (type: string, name: string) =>
+    !!focusKey && focusType === type && name.toLowerCase().includes(focusKey);
 
   return (
     // xl layout: flex row with `gap-4` (1rem) between the dashboard column
@@ -216,7 +240,14 @@ function DashboardBody({
               <SnapshotCard title="Active Conditions" icon={<Stethoscope size={14} />}>
                 {snapshot.active_conditions.length > 0 ? (
                   snapshot.active_conditions.map((condition) => (
-                    <div key={condition.name} className="rounded-md bg-slate-100 px-2 py-1.5">
+                    <div
+                      key={condition.name}
+                      className={`rounded-md px-2 py-1.5 ${
+                        isFocused('condition', condition.name)
+                          ? 'bg-amber-100 ring-2 ring-amber-400'
+                          : 'bg-slate-100'
+                      }`}
+                    >
                       <p className="text-xs font-semibold text-slate-800">{condition.name}</p>
                       <p className="text-[10px] text-slate-500">{condition.first_seen ?? condition.status}</p>
                       <VerificationBadge status={condition.verification_status} />
@@ -232,7 +263,14 @@ function DashboardBody({
                   snapshot.current_medications
                     .filter((m) => m.status === 'Active')
                     .map((medication) => (
-                      <div key={medication.name} className="rounded-md bg-blue-50 px-2 py-1.5">
+                      <div
+                        key={medication.name}
+                        className={`rounded-md px-2 py-1.5 ${
+                          isFocused('med', medication.name)
+                            ? 'bg-amber-100 ring-2 ring-amber-400'
+                            : 'bg-blue-50'
+                        }`}
+                      >
                         <p className="text-xs font-semibold text-slate-800">{medication.name}</p>
                         <p className="text-[10px] text-slate-500">
                           {medication.dose ?? '?'} - {medication.frequency ?? '?'}
@@ -290,8 +328,34 @@ function DashboardBody({
           </section>
 
           <div>
-            <LabTrends labs={snapshot.lab_trends} />
+            <LabTrends
+              labs={snapshot.lab_trends}
+              highlightTest={focusType === 'lab' ? collab?.focus?.key : undefined}
+            />
           </div>
+
+          {collab && collab.insights.length > 0 && (
+            <section className="rounded-xl border border-blue-200 bg-blue-50/60 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <Sparkles size={14} className="text-primary" />
+                <h2 className="text-sm font-semibold text-slate-900">Agent collaboration insights</h2>
+                {collab.isAgentRunning && (
+                  <Loader2 size={12} className="animate-spin text-slate-400" />
+                )}
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {collab.insights.map((card) => (
+                  <article
+                    key={card.id || card.title}
+                    className="rounded-lg border border-blue-200 bg-white px-3 py-2"
+                  >
+                    <p className="text-xs font-semibold text-slate-900">{card.title}</p>
+                    <p className="mt-1 text-[11px] leading-5 text-slate-600">{card.body}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_330px]">
             <Timeline timeline={snapshot.timeline} onRefresh={onRefresh} />
@@ -386,15 +450,27 @@ function DashboardBody({
                 <FileText size={16} className="text-blue-300" />
               </div>
               <div className="grid gap-3">
-                {snapshot.doctor_checklist.map((item) => {
-                  const checked = checkedItems.has(item);
+                {(collab?.checklist?.length
+                  ? collab.checklist
+                  : snapshot.doctor_checklist.map((text, index) => ({
+                      id: `local-${index}`,
+                      text,
+                      done: checkedItems.has(text),
+                      agentNote: undefined as string | undefined,
+                    }))
+                ).map((item) => {
+                  const checked = item.done;
                   return (
-                    <label key={item} className="group flex cursor-pointer items-start gap-3">
+                    <label key={item.id} className="group flex cursor-pointer items-start gap-3">
                       <input
                         type="checkbox"
                         className="sr-only"
                         checked={checked}
-                        onChange={() => toggleChecklistItem(item)}
+                        onChange={() =>
+                          collab
+                            ? collab.toggleChecklistItem(item.id)
+                            : toggleChecklistItem(item.text)
+                        }
                       />
                       <div
                         className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all duration-200 ${
@@ -407,13 +483,18 @@ function DashboardBody({
                           <div className="h-2 w-2 rounded-sm bg-blue-500 opacity-0 transition-opacity group-hover:opacity-30" />
                         )}
                       </div>
-                      <span
-                        className={`text-[12px] leading-5 transition-colors duration-200 ${
-                          checked ? 'text-slate-500 line-through' : 'text-slate-300'
-                        }`}
-                      >
-                        {item}
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        <span
+                          className={`text-[12px] leading-5 transition-colors duration-200 ${
+                            checked ? 'text-slate-500 line-through' : 'text-slate-300'
+                          }`}
+                        >
+                          {item.text}
+                        </span>
+                        {item.agentNote ? (
+                          <p className="mt-1 text-[10px] leading-4 text-blue-300/90">{item.agentNote}</p>
+                        ) : null}
+                      </div>
                     </label>
                   );
                 })}
@@ -425,13 +506,15 @@ function DashboardBody({
 
         <aside className="mt-4 xl:sticky xl:top-4 xl:mt-0 xl:w-[480px] xl:shrink-0 xl:self-start">
           <div className="flex h-[560px] flex-col overflow-hidden rounded-xl border border-border bg-white shadow-[0_1px_3px_0_rgb(15_23_42_/_0.08)] xl:h-[calc(100vh-2rem)]">
-            <AIChatPanel
-              patientId={patient.id}
-              patientName={patient.name}
-              primaryDoctor={patient.primary_doctor ?? 'Doctor'}
-              onUploaded={onRefresh}
-              suggestedPrompts={suggestedPrompts}
-            />
+            {collab?.aside ?? (
+              <AIChatPanel
+                patientId={patient.id}
+                patientName={patient.name}
+                primaryDoctor={patient.primary_doctor ?? 'Doctor'}
+                onUploaded={onRefresh}
+                suggestedPrompts={suggestedPrompts}
+              />
+            )}
           </div>
         </aside>
       </div>

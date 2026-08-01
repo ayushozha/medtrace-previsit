@@ -31,7 +31,7 @@ const EMPTY_STUDY: Study = {
   segmentations: [],
   report: {
     summary: 'Awaiting DICOM upload',
-    findings: 'Upload a DICOM file to render the image and generate a Qwen VL draft report.',
+    findings: 'Upload a DICOM file to render the image and generate a Fireworks VL draft report.',
     impression: 'No imaging study is loaded.',
     recommendation: 'Use the Upload DICOM control on the left panel.',
     confidence: 0,
@@ -39,7 +39,7 @@ const EMPTY_STUDY: Study = {
   },
 };
 
-const MOCK_STATUS: ImagingStatus = { provider: 'mock', nebius_configured: false, model: null };
+const MOCK_STATUS: ImagingStatus = { provider: 'mock', fireworks_configured: false, model: null };
 
 /** DICOM upload → ROI segmentation → draft report → doctor review, all in one screen. */
 export function ImagingWorkspace() {
@@ -93,7 +93,7 @@ export function ImagingWorkspace() {
         report: {
           summary: 'Awaiting AI review',
           findings:
-            'The study is loaded locally. Run MedSAM2 segmentation or Qwen VL report generation.',
+            'The study is loaded locally. Run MedSAM2 segmentation or Fireworks VL report generation.',
           impression: 'Pending AI draft and clinician review.',
           recommendation: 'Select an ROI for segmentation if a suspicious region is present.',
           confidence: 0,
@@ -126,7 +126,20 @@ export function ImagingWorkspace() {
       setSegmentVisible(true);
 
       try {
-        const segmentation = await requestSegmentation(studyId, prompt);
+        // The box carries the slice it was drawn on (so a volumetric model can propagate
+        // from it) and the viewer's window/level — MedSAM2 normalizes intensities to that
+        // window, so segmenting "what the clinician sees" is what keeps masks tight.
+        const window = voi
+          ? {
+              window_lower: voi.windowCenter - voi.windowWidth / 2,
+              window_upper: voi.windowCenter + voi.windowWidth / 2,
+            }
+          : {};
+        const segmentation = await requestSegmentation(studyId, {
+          ...prompt,
+          slice_index: sliceIndex,
+          ...window,
+        });
         updateStudy(studyId, (s) => ({
           ...s,
           status: 'ready',
@@ -145,7 +158,7 @@ export function ImagingWorkspace() {
         updateStudy(studyId, (s) => ({ ...s, status: 'ready', segmentations: [fallback] }));
       }
     },
-    [study.id, updateStudy],
+    [sliceIndex, voi, study.id, updateStudy],
   );
 
   const runReport = useCallback(async () => {
@@ -165,22 +178,22 @@ export function ImagingWorkspace() {
         ...s,
         status: 'ready',
         report: {
-          summary: 'Qwen VL draft unavailable',
+          summary: 'Fireworks VL draft unavailable',
           findings:
             s.segmentations.length > 0
               ? `AI draft based on ${s.segmentations.length} segmentation ROI(s). ${message}`
               : message,
           impression:
             'Preliminary decision support only. No autonomous diagnosis should be made from this draft.',
-          recommendation: imagingStatus.nebius_configured
-            ? 'Qwen VL appears configured. Restart the API if the key changed, then try Generate again.'
-            : 'Set NEBIUS_API_KEY in the repo .env, restart the API, then generate the report again.',
+          recommendation: imagingStatus.fireworks_configured
+            ? 'Fireworks VL appears configured. Restart the API if the key changed, then try Generate again.'
+            : 'Set FIREWORKS_API_KEY in the repo .env, restart the API, then generate the report again.',
           confidence: s.segmentations.length > 0 ? 0.72 : 0.38,
-          source: 'qwen-vl',
+          source: 'fireworks-vl',
         },
       }));
     }
-  }, [imagingStatus.nebius_configured, study.body_part, study.id, study.modality, study.segmentations, updateStudy]);
+  }, [imagingStatus.fireworks_configured, study.body_part, study.id, study.modality, study.segmentations, updateStudy]);
 
   return (
     <div className="h-[calc(100vh-3.5rem)] overflow-hidden bg-[#05070b] text-slate-100">

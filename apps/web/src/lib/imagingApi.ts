@@ -38,7 +38,12 @@ export async function requestSegmentation(
     { prompt },
     signal,
   );
-  return { ...seg, overlay_url: absoluteAssetUrl(seg.overlay_url) ?? null };
+  return {
+    ...seg,
+    overlay_url: absoluteAssetUrl(seg.overlay_url) ?? null,
+    mask_url: absoluteAssetUrl(seg.mask_url) ?? null,
+    slice_overlay_urls: (seg.slice_overlay_urls ?? []).map((u) => absoluteAssetUrl(u) ?? null),
+  };
 }
 
 export function requestReport(

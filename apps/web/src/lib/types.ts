@@ -161,7 +161,7 @@ export interface ClinicalSnapshot {
 
 // ---- Imaging (apps/api/routers/studies.py) ----
 
-export type ReportSource = 'mock' | 'medgemma' | 'qwen-vl';
+export type ReportSource = 'mock' | 'medgemma' | 'fireworks-vl' | 'qwen-vl';
 export type StudyStatus = 'ready' | 'segmenting' | 'reporting';
 export type ReviewDecision = 'unreviewed' | 'accepted' | 'needs-correction';
 
@@ -170,6 +170,11 @@ export interface RoiBox {
   y: number;
   width: number;
   height: number;
+  /** Slice the box was drawn on; omitted/null means the middle slice. */
+  slice_index?: number | null;
+  /** Intensity window (HU) MedSAM2 normalizes with — from the viewer's window/level. */
+  window_lower?: number | null;
+  window_upper?: number | null;
 }
 
 export interface Segmentation {
@@ -180,7 +185,18 @@ export interface Segmentation {
   /** The API only ever returns `medsam2`; `mock` marks a client-side offline fallback. */
   source: 'medsam2' | 'mock';
   box: RoiBox;
+  /** Overlay for the prompt slice (or the whole image on the legacy 2D path). */
   overlay_url?: string | null;
+  // Volumetric fields — present only when the study is a multi-slice series.
+  prompt_slice?: number | null;
+  /** Raw uint8 mask bytes ([depth, rows, cols], C-order) for the Cornerstone labelmap. */
+  mask_url?: string | null;
+  /** [depth, rows, cols] */
+  mask_shape?: number[] | null;
+  /** [dz, dy, dx] in mm */
+  voxel_spacing_mm?: number[] | null;
+  /** Indexed by slice; null where the mask is empty on that slice. */
+  slice_overlay_urls?: (string | null)[];
 }
 
 export interface DraftReport {
@@ -226,7 +242,7 @@ export interface Study extends StudyUpload {
 
 /** The `imaging` block of `GET /api/health`. */
 export interface ImagingStatus {
-  provider: 'mock' | 'qwen-vl';
-  nebius_configured: boolean;
+  provider: 'mock' | 'fireworks-vl';
+  fireworks_configured: boolean;
   model: string | null;
 }

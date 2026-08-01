@@ -45,6 +45,18 @@ coverage/
 node_modules/
 dist/
 
+# Playwright (local browser cache, reports, run artifacts — not source tests)
+.playwright/
+.playwright-cli/
+playwright/.cache/
+playwright-report/
+blob-report/
+test-results/
+output/playwright/
+
+# Large local DICOM sample archives (see samples/dicom/README.md for download)
+samples/dicom/*.zip
+
 # Runtime / local databases (transcription sessions, etc.)
 *.db
 *.sqlite

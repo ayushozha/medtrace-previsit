@@ -10,9 +10,9 @@ Clinical AI tooling in one monorepo: **one FastAPI service** and **one React app
 - **`apps/api/`** (`apps.api.main:app`, port **8001**) — clinical routes (patients, documents,
   chat threads, derived clinical views) plus imaging routes (DICOM upload, MedSAM2 segmentation,
   draft reports).
-- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — four route surfaces: `/` and
-  `/patients/:patientId` (dashboard), `/imaging` (DICOM viewer), `/session` (voice consultation),
-  and `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit flow).
+- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — `/` (landing),
+  `/patients` + `/patients/:id` (dashboard), `/imaging`, `/session`, and
+  `/yc-medplum-hackathon-demo`.
 
 `services/transcription/` is a preserved prototype backing the `/session` route: a LangGraph
 backend (8010) behind a CopilotKit Express runtime (4000). It is **not** part of `npm run dev`.
@@ -114,8 +114,8 @@ segmentation overlays. `data/studies/` is gitignored.
 
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter** (`MEDSAM2_ADAPTER_MODULE` /
-`MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Qwen VL via Nebius
-(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock only when both key and model are absent, and fail visibly when the pair is incomplete.
+`MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Fireworks VL
+(`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`); mock without the key.
 
 **DICOM handling:** `pydicom`, rescaled via `RescaleSlope`/`RescaleIntercept`, windowed via
 `WindowCenter`/`WindowWidth`. ROI prompts are normalised 0–1 and converted to pixels backend-side.
@@ -128,7 +128,8 @@ file mirroring `apps/api/schemas.py` (`src/lib/types.ts`).
 
 | Route | Component | Notes |
 |-------|-----------|-------|
-| `/`, `/patients/:patientId` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
+| `/` | `LandingPage` | Product landing page and workspace entry point |
+| `/patients`, `/patients/:id` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
 | `/imaging` | `components/imaging/` | Dark viewer (deliberate for radiology), ROI drag → segmentation |
 | `/session` | `components/session/` | **Lazy-loaded** — CopilotKit + tiptap are ~2 MB |
 | `/yc-medplum-hackathon-demo` | `components/demo/` | Synthetic chart, evidence review, Medplum write, Stedi eligibility |
@@ -148,9 +149,10 @@ runtime. `/api/copilotkit` must stay the first proxy entry — Vite matches them
   connection failure: Vite serves in ~200 ms, the API needs a second or two to start listening.
 - **`.env` inline comments break values**: dotenv treats `KEY=value  # note` as part of the value.
   Put comments on their own lines.
-- **The `/session` route needs two extra processes** (`npm run dev:transcription`). Transcription
-  uses the env-selected Gemini or OpenAI model; report generation and optional speech also require
-  explicit env-selected OpenAI-compatible model settings.
+- **The `/session` route and patient-chart Agent collab need two extra processes**
+  (`npm run dev:transcription`). STT/TTS use **Deepgram** (`DEEPGRAM_API_KEY`); session report
+  + dashboard checklist agents use an OpenAI-compatible chat endpoint (`OPENAI_*`). Classic
+  REST `AIChatPanel` on the chart still works without that stack.
 - **A pydicom sample for testing uploads**:
   `.venv/bin/python -c "import pydicom.data,os;print(os.path.join(os.path.dirname(pydicom.data.__file__),'test_files','MR_small.dcm'))"`
 - **Vision ingest cost**: one multimodal call per PDF page. Cap with the `dpi` / `max_pages` form

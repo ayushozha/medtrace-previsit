@@ -17,18 +17,17 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
     derived AI-memory/knowledge projection and Fireworks AI supplies LLM/VLM
     calls. Clinical routes need backend-only Medplum client credentials; Zep
     outages do not block canonical dashboard reads or lose documents/messages.
-  - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Qwen VL via
-    Nebius). **Runs fully in mock mode with no secrets** — the easiest path to a
-    working end-to-end demo.
-- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app, four
-  routes: `/` + `/patients/:patientId` (dashboard), `/imaging` (DICOM viewer),
-  `/session` (voice consultation, lazy-loaded), and
-  `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit demo).
-- **`services/transcription/`** — preserved prototype backing `/session`: a
-  LangGraph backend (8010) behind a CopilotKit Express runtime (4000). Started
-  separately with `npm run dev:transcription`; transcription is selected through
-  `GEMINI_TRANSCRIBE_MODEL` or `OPENAI_TRANSCRIBE_MODEL`, while the report and
-  optional speech paths use env-selected OpenAI-compatible models.
+  - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Fireworks VL).
+    **Runs in mock mode without `FIREWORKS_API_KEY`** — still fine for UI demos.
+- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app with
+  `/` (landing), `/patients` + `/patients/:id` (dashboard), `/imaging`,
+  `/session` (voice, lazy-loaded), and `/yc-medplum-hackathon-demo`.
+- **`services/transcription/`** — prototype backing `/session` and optional
+  patient-chart CopilotKit checklist collab: LangGraph (8010) + CopilotKit
+  Express (4000). Started with `npm run dev:transcription`; STT/TTS via
+  **Deepgram** (`DEEPGRAM_API_KEY`), report + dashboard agents via `OPENAI_*`
+  (can point at Fireworks). Session agent `predictive_state_updates`; dashboard
+  agent `dashboard_clinical`.
 
 Depth references: `README.md` (Medplum/Zep flows), `CLAUDE.md` (architecture +
 gotchas), `DBMS-design.md` (canonical FHIR model).
@@ -165,9 +164,8 @@ parent/child `Communication` resources and conditional request identifiers.
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter**
 (`MEDSAM2_ADAPTER_MODULE` / `MEDGEMMA_MODEL_ID`) → **deterministic mock**.
-Reports use Qwen VL via Nebius (`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`,
-`NEBIUS_QWEN_VL_MODEL`); deterministic mock only when both key and model are absent,
-and an explicit configuration error when the pair is incomplete. DICOM previews:
+Draft reports prefer Fireworks VL (`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`)
+before the MedGemma HTTP/local paths; mock without a Fireworks key. DICOM previews:
 pydicom with `RescaleSlope`/`RescaleIntercept` and windowing
 (`WindowCenter`/`WindowWidth`); ROI prompts are normalized 0–1 and converted to
 pixels server-side.
@@ -236,7 +234,7 @@ Vite is serving in ~200 ms while the API needs a second or two to listen.
 - **Never commit secrets.** `.env` is gitignored; `.env.example` holds
   placeholders only. `MEDPLUM_CLIENT_SECRET` is server-side only — never expose it in
   frontend bundles. The same applies to
-  `FIREWORKS_API_KEY`, `ZEP_API_KEY`, `NEBIUS_API_KEY`, `OPENAI_API_KEY`.
+  `FIREWORKS_API_KEY`, `ZEP_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`.
 - **Patient-data hygiene**: `data/` (historical imports, uploaded studies, notes)
   is largely gitignored on purpose — `data/studies/`, historical import folders,
   `data/**/*.pdf|.txt|.png|.jpg`. Do not commit real or realistic patient data;
