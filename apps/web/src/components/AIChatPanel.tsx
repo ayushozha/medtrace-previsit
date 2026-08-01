@@ -15,9 +15,16 @@ interface AIChatPanelProps {
   patientName: string;
   primaryDoctor: string;
   onUploaded?: () => void;
+  suggestedPrompts?: string[];
 }
 
-export function AIChatPanel({ patientId, patientName, primaryDoctor, onUploaded }: AIChatPanelProps) {
+export function AIChatPanel({
+  patientId,
+  patientName,
+  primaryDoctor,
+  onUploaded,
+  suggestedPrompts = [],
+}: AIChatPanelProps) {
   const { messages, sending, loading, error, sendMessage } = useChat(patientId);
   const { uploading, error: uploadError, upload } = useUploadDocument();
   const [query, setQuery] = useState('');
@@ -199,6 +206,20 @@ export function AIChatPanel({ patientId, patientName, primaryDoctor, onUploaded 
       )}
 
       <div className="z-10 mt-auto border-t border-border bg-white/85 p-3 shadow-[0_-10px_20px_-10px_rgba(15,23,42,0.12)] backdrop-blur">
+        {suggestedPrompts.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {suggestedPrompts.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => setQuery(prompt)}
+                className="rounded-md border border-blue-100 bg-blue-50 px-2 py-1 text-left text-[10px] font-semibold leading-4 text-primary transition hover:bg-blue-100"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        )}
         {pendingFiles.length > 0 && (
           <div className="flex flex-wrap gap-2 px-1 pb-2">
             {pendingFiles.map((file, i) => (

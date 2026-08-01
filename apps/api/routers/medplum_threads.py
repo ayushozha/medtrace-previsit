@@ -133,6 +133,15 @@ def send_message(zep_thread_id: str, body: SendMessageIn) -> SendMessageOut:
             "medications": repo.medication_views(resources),
             "allergies": repo.allergy_views(resources),
             "labs": repo.lab_views(resources),
+            "timeline": repo.timeline_views(resources),
+            "approved_previsit_reconstructions": [
+                item
+                for item in repo.json_document_payloads(
+                    resources,
+                    document_type="Clinician-approved pre-visit reconstruction",
+                )
+                if (item.get("payload") or {}).get("workflow_state") == "complete"
+            ],
         }
         combined_context = f"{zep_context}\n\n## Canonical FHIR chart\n{fhir_context}".strip()
 

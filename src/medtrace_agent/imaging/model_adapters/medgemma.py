@@ -27,10 +27,14 @@ class MedGemmaService:
         self.device = os.getenv("MEDGEMMA_DEVICE", "auto")
         self.nebius_api_key = os.getenv("NEBIUS_API_KEY")
         self.nebius_base_url = os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1")
-        self.nebius_model = os.getenv("NEBIUS_QWEN_VL_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct")
+        self.nebius_model = os.getenv("NEBIUS_QWEN_VL_MODEL")
 
     def generate_report(self, study_id: str, request: Any) -> dict[str, Any]:
-        if self.nebius_api_key:
+        if bool(self.nebius_api_key) != bool(self.nebius_model):
+            raise RuntimeError(
+                "NEBIUS_API_KEY and NEBIUS_QWEN_VL_MODEL must be configured together."
+            )
+        if self.nebius_api_key and self.nebius_model:
             return self._generate_report_nebius_qwen(study_id, request)
 
         if self.endpoint:
@@ -42,10 +46,16 @@ class MedGemmaService:
         return self._mock_report(request)
 
     def status(self) -> dict[str, Any]:
+        configuration_error = bool(self.nebius_api_key) != bool(self.nebius_model)
         return {
-            "provider": "qwen-vl" if self.nebius_api_key else "mock",
-            "nebius_configured": bool(self.nebius_api_key),
-            "model": self.nebius_model if self.nebius_api_key else None,
+            "provider": (
+                "configuration-error"
+                if configuration_error
+                else "qwen-vl" if self.nebius_api_key and self.nebius_model else "mock"
+            ),
+            "nebius_configured": bool(self.nebius_api_key and self.nebius_model),
+            "model": self.nebius_model if self.nebius_api_key and self.nebius_model else None,
+            "configuration_error": configuration_error,
         }
 
     def _generate_report_nebius_qwen(self, study_id: str, request: Any) -> dict[str, Any]:
@@ -216,7 +226,10 @@ class MedGemmaService:
             "summary": "Mock Qwen VL draft assessment",
             "findings": f"{request.modality} {request.body_part} study reviewed with {roi_count} segmentation ROI(s).",
             "impression": "Draft impression placeholder until Qwen VL is configured.",
-            "recommendation": "Set NEBIUS_API_KEY in the repo .env and restart the API so Qwen VL can answer from the image.",
+            "recommendation": (
+                "Set both NEBIUS_API_KEY and NEBIUS_QWEN_VL_MODEL in the repo .env, then restart "
+                "the API so Qwen VL can answer from the image."
+            ),
             "confidence": 0.78 if roi_count else 0.55,
             "source": "qwen-vl",
         }

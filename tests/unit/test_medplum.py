@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -94,6 +96,45 @@ def test_operation_outcome_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None
     assert caught.value.status_code == 422
 
 
+def test_update_uses_version_if_match_and_surfaces_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: response(
+            200,
+            {"access_token": "token", "expires_in": 3600},
+            "http://localhost:8103/oauth2/token",
+        ),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs["headers"])
+        return response(
+            412,
+            {
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "diagnostics": "Version conflict"}],
+            },
+            url,
+        )
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    client = MedplumClient(client_id="client", client_secret="secret")
+    with pytest.raises(MedplumError, match="Version conflict") as caught:
+        client.update(
+            {
+                "resourceType": "DocumentReference",
+                "id": "journal-1",
+                "meta": {"versionId": "7"},
+            }
+        )
+    assert captured["If-Match"] == 'W/"7"'
+    assert caught.value.status_code == 412
+
+
 def test_client_rejects_external_pagination_link(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         httpx,
@@ -176,3 +217,36 @@ def test_patient_view_uses_stable_zep_identifier() -> None:
     assert view["id"] == "p1"
     assert view["zep_user_id"] == "zep-1"
     assert view["sex"] == "F"
+
+
+def test_repository_decodes_approved_reconstruction_context() -> None:
+    payload = {"workflow_state": "complete", "draft": {"summary": "Missed metformin doses"}}
+    resources = {
+        "DocumentReference": [
+            {
+                "resourceType": "DocumentReference",
+                "id": "journal-1",
+                "date": "2026-08-01T12:00:00Z",
+                "type": {"text": "Clinician-approved pre-visit reconstruction"},
+                "content": [
+                    {
+                        "attachment": {
+                            "contentType": "application/json",
+                            "data": base64.b64encode(json.dumps(payload).encode()).decode(),
+                        }
+                    }
+                ],
+            }
+        ]
+    }
+    rows = MedplumRepository(FakeClient()).json_document_payloads(  # type: ignore[arg-type]
+        resources,
+        document_type="Clinician-approved pre-visit reconstruction",
+    )
+    assert rows == [
+        {
+            "document_id": "journal-1",
+            "date": "2026-08-01T12:00:00Z",
+            "payload": payload,
+        }
+    ]

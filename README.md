@@ -4,14 +4,43 @@
 
 One FastAPI service and one React app, sharing the `src/medtrace_agent/` Python package (`medtrace-agent` 0.2.0).
 
+[![Status: hackathon demo](https://img.shields.io/badge/status-hackathon%20demo-0052CC)](#yc-medplum-hackathon-demo)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)](pyproject.toml)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](apps/api)
+[![React 19](https://img.shields.io/badge/web-React%2019-149ECA)](apps/web)
+[![FHIR R4](https://img.shields.io/badge/interop-FHIR%20R4-E34F26)](#yc-medplum-hackathon-demo)
+
 | Surface | Path | Port |
 |---------|------|------|
 | API (clinical + imaging) | `apps/api/` (`apps.api.main:app`) | 8001 |
-| Web app | `apps/web/` — `/`, `/patients/:id`, `/imaging`, `/session` | 3000 |
+| Web app | `apps/web/` — `/`, `/patients/:patientId`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
 | Voice prototype | `services/transcription/` (optional; backs `/session`) | 8010 + 4000 |
 
 - **Clinical** — **Medplum FHIR R4 is the only clinical store** for patients, clinical facts, source documents, and transcripts. **Zep Cloud** is a permanent derived AI-memory/knowledge projection; **Fireworks AI** supplies LLM/VLM calls.
 - **Imaging** — DICOM upload, MedSAM2 segmentation, draft reports. **Runs fully in mock mode with no secrets** — easiest path to an end-to-end demo.
+
+**Topics:** clinical AI · pre-visit intake · evidence provenance · FHIR R4 · eligibility and benefits · human-in-the-loop review
+
+## Contents
+
+- [Quick start](#quick-start)
+- [YC Medplum hackathon demo](#yc-medplum-hackathon-demo)
+- [Monorepo layout](#monorepo-layout)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Tests](#tests)
+- [Security and hygiene](#security--hygiene)
+- [Provenance and license](#provenance-and-license)
+
+| Capability | Status |
+|---|---|
+| Existing chart, longitudinal labs, timeline, imaging, and Zep chat | Implemented |
+| Deepgram → Moss → OpenAI pre-visit draft | Source-complete; live credentials required |
+| Clinician-gated Medplum validation and transaction write | Source-complete; live credentials required |
+| Stedi constrained test-mode eligibility | Source-complete; exact supported synthetic test case required |
+| Guaranteed final visit price | Not supported by 270/271 eligibility; intentionally not claimed |
+| AI-led realtime conversational interview | Not implemented; current demo is a recorded/uploaded two-speaker check-in |
+| 3D body/biometric visualization | Not implemented; existing longitudinal charts are 2D |
 
 ---
 
@@ -72,6 +101,82 @@ npm run dev          # api :8001, web :3000
 
 Health check: `curl http://127.0.0.1:8001/api/health`
 Web (Vite binds IPv6 `localhost`): `curl http://localhost:3000`
+
+---
+
+## YC Medplum hackathon demo
+
+Open [`http://localhost:3000/yc-medplum-hackathon-demo`](http://localhost:3000/yc-medplum-hackathon-demo). The route composes the existing chart and visual system; it does not replace the dashboard or create a parallel patient database.
+
+```mermaid
+flowchart LR
+  CHART["Existing patient chart"] --> AUDIO["Synthetic pre-visit audio"]
+  AUDIO --> DG["Deepgram transcript and diarization"]
+  DG --> MOSS["Moss local retrieval"]
+  MOSS --> OAI["OpenAI structured draft"]
+  OAI --> REVIEW{"Clinician approves or corrects"}
+  REVIEW -->|approved only| VALIDATE["Medplum FHIR validation"]
+  VALIDATE --> FHIR["Atomic FHIR transaction and real IDs"]
+  FHIR --> STEDI["Stedi test-mode 270/271"]
+  STEDI --> READY["Saved clinician reconstruction"]
+```
+
+The intended storyboard targets **2:45** and must stop before **3:00**. This is a source-level target, not yet a timed live-provider recording; rehearse and time the final credentialed run before submission.
+
+1. Open the existing synthetic patient chart and show diabetes, worsening HbA1c, medication history, penicillin rash, longitudinal biometrics, and the timeline.
+2. Paste the runtime-only operator token, choose which Deepgram speaker is the patient, and record or upload a 30–40 second two-speaker synthetic check-in.
+3. Show real Deepgram speaker/timestamp evidence, the non-persisted Moss session result, and the OpenAI proposal. Correct the reviewed clinical fields if needed, then approve.
+4. Show Medplum validation success and the actual FHIR resource IDs. No clinical FHIR write occurs before approval.
+5. Run Stedi's official constrained Aetna/Jane Doe test case and show qualifier-aware synthetic benefits. Do not present it as a payer response or a final price.
+6. Close on the saved readiness view and ask: “What changed today, what should the clinician verify, and what evidence supports it?”
+
+The route has no application-generated sponsor fallback. Missing credentials fail visibly. Stedi itself returns Stedi-generated synthetic test data and does not contact a payer. Use synthetic data only: Moss currently lists HIPAA support on Enterprise.
+
+### Provision the one canonical synthetic patient
+
+The demo deliberately refuses an arbitrary FHIR Patient. `YC_DEMO_PATIENT_ID` is the canonical Medplum `Patient.id`, and that resource must be Jane Doe (`2004-04-04`) with all three tags under the repository's `TAG_SYSTEM` (default `https://medtrace.local/fhir/tag`): `synthetic`, `yc-medplum-demo`, and `aetna-jane-doe-20040404`. It must also carry the stable Zep projection identifier `yc-medplum-demo-jane-doe`.
+
+Use an isolated, synthetic-only Medplum project and a least-privilege ClientApplication, then provision the longitudinal FHIR chart idempotently:
+
+```powershell
+python scripts/provision_yc_demo_patient.py
+
+# Copy the printed canonical FHIR ID into .env, then restart the API.
+# YC_DEMO_PATIENT_ID=<printed Patient.id>
+```
+
+The script creates or reconciles the tagged Patient plus stable Condition, MedicationStatement, AllergyIntolerance, HbA1c Observation, and historical Encounter resources. Medplum remains canonical; Zep updates run as retryable Medplum `Task` projections through `npm run dev:zep-sync`. The script does not provision Stedi credentials.
+
+Generate the two workflow secrets separately; reusing them is rejected:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Set the first as `YC_DEMO_CHECKIN_SIGNING_KEY`, the second as `YC_DEMO_ACCESS_TOKEN`, and set server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME`. The browser asks for the access token at runtime, retains it only in dialog memory, and cannot choose approval provenance.
+
+### Demo API surface
+
+All patient-scoped operations require `X-MedTrace-Demo-Token`; `/api/demo/status` is public but exposes only configuration presence and the synthetic chart ID.
+
+| Method | Path | Purpose | Important failure behavior |
+|---|---|---|---|
+| `GET` | `/api/demo/status` | Provider/workflow configuration plus safe demo-patient selection | Returns a Patient ID only after the exact synthetic persona passes its Medplum safety check |
+| `POST` | `/api/demo/patients/{id}/checkins` | Bounded audio → Deepgram → per-check-in Moss session → OpenAI reviewed draft | Rejects non-synthetic Patients, invalid speaker selections or selections with no diarized utterances, recordings over 60 seconds, and missing providers |
+| `POST` | `/api/demo/patients/{id}/checkins/confirm` | Verify signed source evidence, validate FHIR, atomically commit the journal and clinical resources, queue the Zep projection | `approved=false` never builds/writes FHIR; retries reuse the check-in ID |
+| `POST` | `/api/demo/patients/{id}/eligibility` | Run the exact Stedi test tuple and persist normalized benefit fields to Medplum | Requires a completed validated check-in; never stores the raw Stedi payload |
+| `GET` | `/api/demo/patients/{id}/readiness` | Reconstruct the completed clinician view | Rejects partial workflow journals |
+
+Audio is sent to Deepgram but is not persisted by this repository. OpenAI Responses is called with `store=False`. The full diarized transcript is displayed for review; only cited patient-speaker utterances, reviewed changes, provider IDs, validation results, and normalized Stedi fields are retained canonically in Medplum. A durable Medplum `Task` projects the approved note into Zep without blocking canonical readiness. Moss receives credentials/session creation through its control plane, uses a unique per-check-in local session, has telemetry disabled with `MOSS_DISABLE_TELEMETRY=1`, and is never pushed with `push_index()`.
+
+### Cost language
+
+Stedi's official test response can demonstrate coverage, network, copay, coinsurance, deductible, out-of-pocket, coverage-level, and time qualifiers. It is synthetic and not sent to a payer. A 270/271 response also does not provide the negotiated allowed amount or final claim adjudication. The UI therefore shows **patient-responsibility summary: not determinable from test-mode eligibility alone** and labels every returned amount with its qualifiers rather than inventing a total.
+
+### Moss package constraint
+
+The Python integration pins `moss==1.7.2`, which installs the platform-specific `inferedge-moss-core==0.21.0` binary. The published artifacts use the PolyForm Shield license even though the public repository advertises BSD-2-Clause. Hackathon evaluation appears to fit the published evaluation allowance, but production/commercial use needs written sponsor confirmation and deployment-platform verification.
 
 ---
 
@@ -200,7 +305,7 @@ flowchart TB
 
 ### Imaging
 
-`MedSAM2Service` / report adapters resolve in order: **HTTP endpoint** → **local adapter** → **deterministic mock**. Reports use Qwen VL via Nebius when `NEBIUS_API_KEY` is set; otherwise mock. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
+`MedSAM2Service` / report adapters resolve in order: **HTTP endpoint** → **local adapter** → **deterministic mock**. Reports use Qwen VL via Nebius only when both `NEBIUS_API_KEY` and env-driven `NEBIUS_QWEN_VL_MODEL` are set; a partial pair fails visibly instead of silently falling back. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
 
 Sample DICOM for uploads (ships with pydicom):
 
@@ -309,10 +414,17 @@ See **`.env.example`** for every variable. Comments must be on their own lines �
 |------|-----------|
 | **LLM** | `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`, `FIREWORKS_VLM_API`, `FIREWORKS_REASONING_EFFORT` |
 | **Memory** | `ZEP_API_KEY`, `AUTO_APPLY_ZEP_ONTOLOGY` |
-| **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET`, `MEDPLUM_PROJECT_ID` |
+| **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET` |
 | **PDF caps** | `PDF_VL_MAX_PAGES`, `PDF_VL_DPI` |
 | **PubMed** | `NCBI_EMAIL`, `NCBI_API_KEY` (optional) |
 | **Voice `/session`** | `GEMINI_API_KEY` (transcription); `OPENAI_*` for report agent / TTS (can point at Fireworks for chat) |
+| **Imaging draft** | `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and `NEBIUS_QWEN_VL_MODEL` are an all-or-nothing pair/path |
+| **YC demo workflow** | `YC_DEMO_PATIENT_ID`, distinct 32+ character `YC_DEMO_CHECKIN_SIGNING_KEY` and `YC_DEMO_ACCESS_TOKEN`, plus server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME` |
+| **Deepgram** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
+| **Moss** | `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `MOSS_INDEX_NAME`, `MOSS_MODEL_ID`, required `MOSS_DISABLE_TELEMETRY=1`; endpoint overrides must be unset |
+| **OpenAI demo extraction** | `OPENAI_API_KEY`, `OPENAI_MODEL`; leave `OPENAI_BASE_URL` empty for OpenAI |
+| **Medplum demo Patient** | `YC_DEMO_PATIENT_ID` plus the exact synthetic/demo/Stedi tags and Zep identifier created by the provisioner |
+| **Stedi test mode** | `STEDI_TEST_API_KEY` plus the exact documented Aetna/Jane Doe values already shown in `.env.example` |
 | **CORS** | `API_CORS_ORIGINS` (defaults include localhost:3000) |
 
 Clinical data routes return **503** until server-side Medplum client credentials are configured. Core patient, document, transcript, and dashboard storage remains available if Zep is down. Imaging routes are unchanged and degrade to deterministic mock.
@@ -352,7 +464,7 @@ python -m pytest -m "not integration"   # or: npm run test:py
 python -m pytest tests/unit/test_rag_chat.py
 ```
 
-Tests cover `src/medtrace_agent/` only — `apps/api/` has none; verify API changes with the running service. The `integration` marker hits the live NCBI PubMed API.
+Tests cover shared agent modules and focused demo-router orchestration. Live sponsor credentials are still required to verify provider responses and Medplum `$validate` behavior end to end. The `integration` marker hits the live NCBI PubMed API.
 
 ---
 
@@ -363,6 +475,8 @@ Tests cover `src/medtrace_agent/` only — `apps/api/` has none; verify API chan
 - **fastapi** / **uvicorn** — `apps/api`
 - **pypdf** / **pymupdf** / **pydantic** — PDF extract + VLM JSON validation
 - **pydicom** / **numpy** / **pillow** — imaging extra (`pip install -e ".[imaging]"`)
+- **openai** — Responses API structured extraction with Pydantic schemas
+- **moss** / **inferedge-moss-core** — local session retrieval for the voice evidence path
 
 ---
 
@@ -371,6 +485,10 @@ Tests cover `src/medtrace_agent/` only — `apps/api/` has none; verify API chan
 - Never commit `.env` or secrets. `MEDPLUM_CLIENT_SECRET` is server-side only.
 - `data/` (studies, historical imports, uploaded notes) is largely gitignored — do not commit real PHI. Fixtures in `mock/patient_data/` are synthetic.
 - Do not widen CORS to `*` for the main API.
+- Sponsor and Medplum credentials remain server-side. Only the dedicated, separately generated demo access token enters browser memory.
+- `YC_DEMO_ACCESS_TOKEN` is a temporary hackathon operator gate, not production clinician authentication or RBAC. Replace it with authenticated clinician claims before any real deployment.
+- The generic clinical routes are not caller-authenticated; `RequireMedplumDep` checks configuration, not user identity. **Never connect this demo to a PHI-bearing Medplum project.** Use a least-privilege ClientApplication restricted to an isolated synthetic-only project.
+- Use only synthetic audio and patient/member data until appropriate BAAs, retention controls, and production agreements exist.
 - Agent output is non-diagnostic clinical decision support, not a medical device.
 
 ---

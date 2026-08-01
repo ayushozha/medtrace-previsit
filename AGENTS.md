@@ -20,13 +20,15 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
   - *Imaging*: DICOM upload, MedSAM2 segmentation, draft reports (Qwen VL via
     Nebius). **Runs fully in mock mode with no secrets** — the easiest path to a
     working end-to-end demo.
-- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app, three
-  routes: `/` + `/patients/:id` (dashboard), `/imaging` (DICOM viewer),
-  `/session` (voice consultation, lazy-loaded).
+- **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app, four
+  routes: `/` + `/patients/:patientId` (dashboard), `/imaging` (DICOM viewer),
+  `/session` (voice consultation, lazy-loaded), and
+  `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit demo).
 - **`services/transcription/`** — preserved prototype backing `/session`: a
   LangGraph backend (8010) behind a CopilotKit Express runtime (4000). Started
-  separately with `npm run dev:transcription`; uses **OpenAI directly**
-  (`OPENAI_API_KEY`, Whisper + `tts-1`), not Fireworks.
+  separately with `npm run dev:transcription`; transcription is selected through
+  `GEMINI_TRANSCRIBE_MODEL` or `OPENAI_TRANSCRIBE_MODEL`, while the report and
+  optional speech paths use env-selected OpenAI-compatible models.
 
 Depth references: `README.md` (Medplum/Zep flows), `CLAUDE.md` (architecture +
 gotchas), `DBMS-design.md` (canonical FHIR model).
@@ -36,7 +38,7 @@ gotchas), `DBMS-design.md` (canonical FHIR model).
 ```
 apps/
   api/               FastAPI service — clinical + imaging (apps.api.main:app, 8001)
-  web/               React/Vite UI — all three product surfaces (3000)
+  web/               React/Vite UI — dashboard, imaging, session, and YC demo (3000)
 services/
   transcription/     Voice/CopilotKit prototype (backend 8010, runtime 4000)
 src/medtrace_agent/  Shared package (Medplum, Zep, ingest, agents, imaging, ontology)
@@ -164,7 +166,8 @@ parent/child `Communication` resources and conditional request identifiers.
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter**
 (`MEDSAM2_ADAPTER_MODULE` / `MEDGEMMA_MODEL_ID`) → **deterministic mock**.
 Reports use Qwen VL via Nebius (`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`,
-`NEBIUS_QWEN_VL_MODEL`); deterministic mock without the key. DICOM previews:
+`NEBIUS_QWEN_VL_MODEL`); deterministic mock only when both key and model are absent,
+and an explicit configuration error when the pair is incomplete. DICOM previews:
 pydicom with `RescaleSlope`/`RescaleIntercept` and windowing
 (`WindowCenter`/`WindowWidth`); ROI prompts are normalized 0–1 and converted to
 pixels server-side.
@@ -175,10 +178,11 @@ One design system (Tailwind v4 tokens in `src/index.css`, shadcn-style
 primitives in `src/components/ui/`), one typed client (`src/lib/api.ts` +
 `src/lib/imagingApi.ts`, same-origin by default — set `VITE_API_BASE_URL` only
 for a cross-origin API), and `src/lib/types.ts` mirroring `apps/api/schemas.py`.
-Route components live in `src/components/imaging/` and
-`src/components/session/`; dashboard components at `src/components/` top level.
-The session route is lazy-loaded because CopilotKit + tiptap add ~2 MB, and
-carries its own `session.css`; other routes are pure Tailwind.
+Route components live in `src/components/imaging/`, `src/components/session/`,
+and `src/components/demo/`; dashboard components at `src/components/` top level.
+The session route is lazy-loaded because CopilotKit + tiptap add ~2 MB.
+`session.css` is shared by the session workspace and the demo check-in dialog;
+the remaining routes are pure Tailwind.
 
 **Vite proxies everything the browser needs**: `/api` and `/data` to the API
 (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8001`) and
@@ -240,6 +244,12 @@ Vite is serving in ~200 ms while the API needs a second or two to listen.
   fixtures in `mock/patient_data/` are synthetic (no PHI).
 - **CORS** is configured via `API_CORS_ORIGINS` (defaults to localhost:3000
   variants) — don't widen it to `*` for the main API.
+- **Synthetic-only deployment boundary**: the generic clinical routes have no
+  caller authentication; the Medplum dependency checks server configuration,
+  not end-user identity. Never connect this demo to a PHI-bearing Medplum
+  project. Use a least-privilege ClientApplication scoped to an isolated
+  synthetic-only project. The YC operator token protects its workflow routes
+  but is not app-wide authentication or RBAC.
 - **Demo-grade output**: vision ingest can misread numbers or hallucinate
   structured fields; agent output is non-diagnostic clinical decision support,
   not a medical device. Preserve those disclaimers in code and UI.

@@ -179,7 +179,15 @@ class MedplumClient:
         return self._request("POST", str(resource["resourceType"]), json=resource)
 
     def update(self, resource: dict[str, Any]) -> dict[str, Any]:
-        return self._request("PUT", f"{resource['resourceType']}/{resource['id']}", json=resource)
+        meta = resource.get("meta") if isinstance(resource.get("meta"), dict) else {}
+        version_id = str(meta.get("versionId") or "")
+        headers = {"If-Match": f'W/"{version_id}"'} if version_id else None
+        return self._request(
+            "PUT",
+            f"{resource['resourceType']}/{resource['id']}",
+            json=resource,
+            headers=headers,
+        )
 
     def conditional_upsert(self, resource: dict[str, Any], *, identifier: str) -> dict[str, Any]:
         return self._request("PUT", str(resource["resourceType"]), params={"identifier": identifier}, json=resource)

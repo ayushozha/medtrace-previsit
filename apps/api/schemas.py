@@ -6,7 +6,7 @@ Field names are snake_case throughout — the web client mirrors them verbatim i
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -192,6 +192,172 @@ class ClinicalSnapshotOut(BaseModel):
     timeline: list[TimelineEvent] = Field(default_factory=list)
     documents: list[DocumentOut] = Field(default_factory=list)
     doctor_checklist: list[str] = Field(default_factory=list)
+
+
+# ---- YC Medplum hackathon demo ---------------------------------------------
+
+
+class DemoProviderStatus(BaseModel):
+    configured: bool
+    missing: list[str] = Field(default_factory=list)
+
+
+class DemoStatusOut(BaseModel):
+    demo_patient_id: str | None = None
+    deepgram: DemoProviderStatus
+    moss: DemoProviderStatus
+    openai: DemoProviderStatus
+    medplum: DemoProviderStatus
+    stedi: DemoProviderStatus
+    workflow: DemoProviderStatus
+
+
+class TranscriptUtteranceOut(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    speaker: int = Field(ge=0, le=20)
+    start: float = Field(ge=0, le=60)
+    end: float = Field(ge=0, le=60)
+    text: str = Field(min_length=1, max_length=2_000)
+    confidence: float | None = None
+
+
+class RetrievalEvidenceOut(BaseModel):
+    id: str
+    text: str
+    score: float
+    source: str
+
+
+class MossRetrievalOut(BaseModel):
+    index_name: str
+    query: str
+    time_taken_ms: int | None = None
+    evidence: list[RetrievalEvidenceOut] = Field(default_factory=list)
+    persisted: bool = False
+
+
+DemoChangeKind = Literal["medication_adherence", "allergy_confirmation", "follow_up"]
+DemoText = Annotated[str, Field(min_length=1, max_length=1_000)]
+
+
+class ProposedChangeOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: DemoChangeKind
+    title: str = Field(min_length=1, max_length=200)
+    clinical_subject: str = Field(min_length=1, max_length=200)
+    proposed_value: str = Field(min_length=1, max_length=1_000)
+    evidence_utterance_id: str = Field(min_length=1, max_length=64)
+    evidence_quote: str = Field(min_length=1, max_length=1_000)
+    clinician_note: str = Field(max_length=1_000)
+
+
+class PrevisitDraftOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=2_000)
+    proposed_changes: list[ProposedChangeOut] = Field(max_length=10)
+    unresolved_questions: list[DemoText] = Field(max_length=10)
+    clinician_verification: list[DemoText] = Field(max_length=10)
+    recommended_visit: bool
+    recommended_service: str = Field(max_length=200)
+
+
+class DemoCheckinOut(BaseModel):
+    checkin_id: str
+    patient_id: str
+    deepgram_request_id: str
+    deepgram_model: str
+    openai_response_id: str
+    patient_speaker: int = Field(ge=0, le=20)
+    checkin_token: str
+    utterances: list[TranscriptUtteranceOut] = Field(max_length=80)
+    moss: MossRetrievalOut
+    draft: PrevisitDraftOut
+    write_status: Literal["not_written"] = "not_written"
+
+
+class DemoConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checkin_id: str = Field(min_length=1, max_length=64)
+    deepgram_request_id: str = Field(min_length=1, max_length=128)
+    openai_response_id: str = Field(min_length=1, max_length=128)
+    patient_speaker: int = Field(ge=0, le=20)
+    checkin_token: str = Field(min_length=1, max_length=2_048)
+    utterances: list[TranscriptUtteranceOut] = Field(min_length=1, max_length=80)
+    source_draft: PrevisitDraftOut
+    draft: PrevisitDraftOut
+    approved: bool
+
+
+class FhirValidationOut(BaseModel):
+    resource_type: str
+    valid: bool
+    notices: list[str] = Field(default_factory=list)
+
+
+class FhirResourceOut(BaseModel):
+    resource_type: str | None = None
+    resource_id: str | None = None
+    version_id: str | None = None
+    location: str | None = None
+    status: str
+    checkin_id: str | None = None
+
+
+class DemoConfirmOut(BaseModel):
+    checkin_id: str
+    approved: bool
+    validation_status: Literal["passed"]
+    validations: list[FhirValidationOut]
+    resources: list[FhirResourceOut]
+    document_id: str
+
+
+class DemoEligibilityIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checkin_id: str
+
+
+class EligibilityBenefitOut(BaseModel):
+    code: str
+    name: str
+    benefit_amount: float | None = None
+    benefit_percent: float | None = None
+    coverage_level_code: str | None = None
+    in_plan_network_indicator_code: str | None = None
+    time_qualifier_code: str | None = None
+    service_type_codes: list[str] = Field(default_factory=list)
+    additional_information: list[Any] = Field(default_factory=list)
+
+
+class DemoEligibilityOut(BaseModel):
+    checkin_id: str
+    transaction_id: str
+    trace_id: str
+    application_mode: Literal["test"]
+    coverage_active: bool | None = None
+    plan_status: list[dict[str, Any]] = Field(default_factory=list)
+    benefits: list[EligibilityBenefitOut] = Field(default_factory=list)
+    patient_responsibility_summary: str
+    disclaimer: str
+    medplum_resource: FhirResourceOut
+
+
+class DemoReadinessOut(BaseModel):
+    checkin_id: str
+    patient_id: str
+    approved_at: str
+    clinician_name: str
+    what_changed: list[ProposedChangeOut] = Field(default_factory=list)
+    clinician_verification: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    utterances: list[TranscriptUtteranceOut] = Field(default_factory=list)
+    resources: list[FhirResourceOut] = Field(default_factory=list)
+    validation_status: Literal["passed"]
+    eligibility: dict[str, Any] | None = None
 
 
 # ---- Imaging (DICOM studies, segmentation, draft reports) --------------------

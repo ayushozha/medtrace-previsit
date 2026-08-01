@@ -29,6 +29,14 @@ def _payload(message: dict) -> str:
     return str(payload[0].get("contentString") or "") if payload and isinstance(payload[0], dict) else ""
 
 
+def _input_string(task: dict, label: str) -> str | None:
+    for item in task.get("input") or []:
+        if isinstance(item, dict) and (item.get("type") or {}).get("text") == label:
+            value = str(item.get("valueString") or "").strip()
+            return value or None
+    return None
+
+
 def process_task(task: dict) -> bool:
     repo = repository()
     code = (task.get("code") or {}).get("text")
@@ -38,11 +46,14 @@ def process_task(task: dict) -> bool:
         repo.abandon_projection_task(task, reason="Patient not found for projection task.")
         return False
     zep_user_id = identifier_value(patient, ZEP_USER_SYSTEM) or ""
+    if not zep_user_id:
+        repo.abandon_projection_task(task, reason="Patient is missing its Zep projection identifier.")
+        return False
     names = patient.get("name") or []
     patient_name = str(names[0].get("text") or zep_user_id) if names and isinstance(names[0], dict) else zep_user_id
-    ensure_user(zep_user_id, patient_name)
 
     try:
+        ensure_user(zep_user_id, patient_name)
         if code == "zep-chat-projection":
             thread_id = _input_reference(task, "thread", "Communication")
             user_id = _input_reference(task, "user-message", "Communication")
@@ -81,6 +92,23 @@ def process_task(task: dict) -> bool:
                     filename=filename,
                     doc_id=doc_id,
                 )
+            repo.complete_projection_task(task, episode_count=len(episodes))
+            return True
+
+        if code == "zep-demo-projection":
+            note_text = _input_string(task, "note-text")
+            doc_id = str((task.get("focus") or {}).get("reference") or "").removeprefix("DocumentReference/")
+            if not note_text or not doc_id:
+                repo.abandon_projection_task(task, reason="Demo projection task is missing its note or journal reference.")
+                return False
+            episodes = ingest_plain_text_note_to_patient_graph(
+                zep_user_id,
+                note_text,
+                note_source="session_note",
+                filename=f"previsit-{doc_id}.txt",
+                doc_id=doc_id,
+                extra_metadata={"medplum_validated": True},
+            )
             repo.complete_projection_task(task, episode_count=len(episodes))
             return True
     except Exception:

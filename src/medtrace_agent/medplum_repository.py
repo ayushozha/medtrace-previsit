@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 import re
 import uuid
@@ -484,6 +487,40 @@ class MedplumRepository:
         docs.sort(key=lambda item: item["uploaded_at"], reverse=True)
         return docs
 
+    def json_document_payloads(
+        self,
+        resources: dict[str, list[dict[str, Any]]],
+        *,
+        document_type: str,
+    ) -> list[dict[str, Any]]:
+        """Decode bounded inline JSON documents for canonical clinical context."""
+        payloads: list[dict[str, Any]] = []
+        for doc in resources.get("DocumentReference") or []:
+            if _coding_text(doc.get("type")) != document_type:
+                continue
+            for content in doc.get("content") or []:
+                attachment = content.get("attachment") if isinstance(content, dict) else None
+                if not isinstance(attachment, dict) or attachment.get("contentType") != "application/json":
+                    continue
+                encoded = attachment.get("data")
+                if not isinstance(encoded, str):
+                    continue
+                try:
+                    value = json.loads(base64.b64decode(encoded, validate=True))
+                except (binascii.Error, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(value, dict):
+                    payloads.append(
+                        {
+                            "document_id": str(doc.get("id") or ""),
+                            "date": str(doc.get("date") or ""),
+                            "payload": value,
+                        }
+                    )
+                    break
+        payloads.sort(key=lambda item: item["date"], reverse=True)
+        return payloads[:10]
+
     def create_document(
         self,
         *,
@@ -748,6 +785,7 @@ class MedplumRepository:
         for status in ("requested", "failed"):
             rows.extend(self.client.search("Task", {"status": status, "code": f"{CODE_SYSTEM}|zep-chat-projection", "_count": count}))
             rows.extend(self.client.search("Task", {"status": status, "code": f"{CODE_SYSTEM}|document-processing", "_count": count}))
+            rows.extend(self.client.search("Task", {"status": status, "code": f"{CODE_SYSTEM}|zep-demo-projection", "_count": count}))
         return rows[:count]
 
     def complete_projection_task(self, task: dict[str, Any], *, error: str | None = None, episode_count: int = 0) -> dict[str, Any]:

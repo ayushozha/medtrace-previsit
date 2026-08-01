@@ -10,8 +10,9 @@ Clinical AI tooling in one monorepo: **one FastAPI service** and **one React app
 - **`apps/api/`** (`apps.api.main:app`, port **8001**) — clinical routes (patients, documents,
   chat threads, derived clinical views) plus imaging routes (DICOM upload, MedSAM2 segmentation,
   draft reports).
-- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — three routes: `/` and
-  `/patients/:id` (dashboard), `/imaging` (DICOM viewer), `/session` (voice consultation).
+- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — four route surfaces: `/` and
+  `/patients/:patientId` (dashboard), `/imaging` (DICOM viewer), `/session` (voice consultation),
+  and `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit flow).
 
 `services/transcription/` is a preserved prototype backing the `/session` route: a LangGraph
 backend (8010) behind a CopilotKit Express runtime (4000). It is **not** part of `npm run dev`.
@@ -93,6 +94,12 @@ The clinical API always uses the `medplum_*` routers. Server-side
 `MEDPLUM_CLIENT_ID` and `MEDPLUM_CLIENT_SECRET` are required; never expose them through Vite.
 `GET /api/health` reports `medplum_configured`, `medplum_reachable`, and `zep_configured`.
 
+The YC flow uses `YC_DEMO_PATIENT_ID` as the canonical FHIR Patient ID. A tagged
+`DocumentReference` is its approval/readiness journal, and a durable
+`zep-demo-projection` Task projects the approved note without blocking canonical
+Medplum reads. The operator token is workflow-specific, not app-wide auth; this
+repository must use an isolated synthetic-only Medplum project.
+
 Dashboard fields are now mapped deterministically from `Condition`, `MedicationStatement`,
 `AllergyIntolerance`, `Observation`, `Encounter`, `DocumentReference`, and `Provenance` in one
 FHIR batch. AI extracted facts remain tagged/unverified. `Binary` + `DocumentReference` own source
@@ -108,7 +115,7 @@ segmentation overlays. `data/studies/` is gitignored.
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter** (`MEDSAM2_ADAPTER_MODULE` /
 `MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Qwen VL via Nebius
-(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock without the key.
+(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock only when both key and model are absent, and fail visibly when the pair is incomplete.
 
 **DICOM handling:** `pydicom`, rescaled via `RescaleSlope`/`RescaleIntercept`, windowed via
 `WindowCenter`/`WindowWidth`. ROI prompts are normalised 0–1 and converted to pixels backend-side.
@@ -121,11 +128,12 @@ file mirroring `apps/api/schemas.py` (`src/lib/types.ts`).
 
 | Route | Component | Notes |
 |-------|-----------|-------|
-| `/`, `/patients/:id` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
+| `/`, `/patients/:patientId` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
 | `/imaging` | `components/imaging/` | Dark viewer (deliberate for radiology), ROI drag → segmentation |
 | `/session` | `components/session/` | **Lazy-loaded** — CopilotKit + tiptap are ~2 MB |
+| `/yc-medplum-hackathon-demo` | `components/demo/` | Synthetic chart, evidence review, Medplum write, Stedi eligibility |
 
-The `/session` route carries its own `session.css`; the other routes are pure Tailwind.
+The session workspace and demo check-in dialog share `session.css`; the other routes are pure Tailwind.
 
 **The browser only ever talks to port 3000.** Vite proxies `/api` and `/data` to the API
 (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8001`) and `/api/copilotkit` to the CopilotKit
@@ -140,8 +148,9 @@ runtime. `/api/copilotkit` must stay the first proxy entry — Vite matches them
   connection failure: Vite serves in ~200 ms, the API needs a second or two to start listening.
 - **`.env` inline comments break values**: dotenv treats `KEY=value  # note` as part of the value.
   Put comments on their own lines.
-- **The `/session` route needs two extra processes** (`npm run dev:transcription`) and uses
-  **OpenAI directly** (`OPENAI_API_KEY`, Whisper + `tts-1`), not Fireworks.
+- **The `/session` route needs two extra processes** (`npm run dev:transcription`). Transcription
+  uses the env-selected Gemini or OpenAI model; report generation and optional speech also require
+  explicit env-selected OpenAI-compatible model settings.
 - **A pydicom sample for testing uploads**:
   `.venv/bin/python -c "import pydicom.data,os;print(os.path.join(os.path.dirname(pydicom.data.__file__),'test_files','MR_small.dcm'))"`
 - **Vision ingest cost**: one multimodal call per PDF page. Cap with the `dpi` / `max_pages` form
