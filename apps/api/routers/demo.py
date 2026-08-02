@@ -14,13 +14,18 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Security, UploadFile
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from apps.api.demo_security import (
+    DEMO_TOKEN_HEADER as _DEMO_TOKEN_HEADER,
+    OPERATOR_IDENTIFIER_SYSTEM as _OPERATOR_IDENTIFIER_SYSTEM,
+    DemoOperator,
+    DemoOperatorDep,
+    require_demo_operator as _require_demo_operator,
+)
 from apps.api.routers.medplum_patients import get_snapshot
 from apps.api.schemas import (
     DemoCheckinOut,
@@ -64,28 +69,14 @@ _CHECKIN_IDENTIFIER_SYSTEM = "https://github.com/ayushozha/medtrace-previsit/che
 _ELIGIBILITY_IDENTIFIER_SYSTEM = (
     "https://github.com/ayushozha/medtrace-previsit/stedi-eligibility"
 )
-_OPERATOR_IDENTIFIER_SYSTEM = "https://github.com/ayushozha/medtrace-previsit/operators"
 _CHECKIN_JOURNAL_TAG = "yc-demo-checkin"
 _CHECKIN_TOKEN_TTL_SECONDS = 2 * 60 * 60
-_DEMO_TOKEN_HEADER = "X-MedTrace-Demo-Token"
 _SPONSOR_RATE_LIMIT = 8
 _SPONSOR_RATE_WINDOW_SECONDS = 60.0
-_demo_token_scheme = APIKeyHeader(
-    name=_DEMO_TOKEN_HEADER,
-    scheme_name="MedTraceDemoToken",
-    description="Runtime-only operator token for the synthetic hackathon workflow.",
-    auto_error=False,
-)
 _sponsor_calls: dict[str, deque[float]] = defaultdict(deque)
 _sponsor_calls_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class DemoOperator:
-    operator_id: str
-    display_name: str
 
 
 def _provider_status(raw: dict[str, object]) -> DemoProviderStatus:
@@ -114,27 +105,6 @@ def _workflow_status() -> dict[str, object]:
     return {"configured": not missing, "missing": missing}
 
 
-def _require_demo_operator(
-    supplied_token: Annotated[str | None, Security(_demo_token_scheme)],
-) -> DemoOperator:
-    configured_token = (os.environ.get("YC_DEMO_ACCESS_TOKEN") or "").strip()
-    if len(configured_token.encode("utf-8")) < 32:
-        raise HTTPException(status_code=503, detail="The demo operator gate is not configured.")
-    if not supplied_token:
-        raise HTTPException(
-            status_code=401,
-            detail=f"{_DEMO_TOKEN_HEADER} is required.",
-            headers={"WWW-Authenticate": "MedTraceDemoToken"},
-        )
-    if not hmac.compare_digest(supplied_token, configured_token):
-        raise HTTPException(status_code=403, detail="The demo operator token is invalid.")
-    operator_id = (os.environ.get("YC_DEMO_OPERATOR_ID") or "").strip()
-    display_name = (os.environ.get("YC_DEMO_OPERATOR_NAME") or "").strip()
-    if not operator_id or not display_name:
-        raise HTTPException(status_code=503, detail="The server-side demo operator identity is incomplete.")
-    return DemoOperator(operator_id=operator_id, display_name=display_name)
-
-
 def _enforce_sponsor_rate_limit(operator: DemoOperator) -> None:
     now = time.monotonic()
     with _sponsor_calls_lock:
@@ -151,7 +121,7 @@ def _enforce_sponsor_rate_limit(operator: DemoOperator) -> None:
 
 async def _require_real_data_layer(
     patient_id: str,
-    _operator: Annotated[DemoOperator, Depends(_require_demo_operator)],
+    _operator: DemoOperatorDep,
 ) -> dict[str, Any]:
     configured_patient_id = (os.environ.get("YC_DEMO_PATIENT_ID") or "").strip()
     if not configured_patient_id:
@@ -171,7 +141,6 @@ async def _require_real_data_layer(
     return repository().patient_view(patient)
 
 
-DemoOperatorDep = Annotated[DemoOperator, Depends(_require_demo_operator)]
 DemoChartDep = Annotated[dict[str, Any], Depends(_require_real_data_layer)]
 
 
@@ -245,6 +214,8 @@ def _issue_checkin_token(
     patient_speaker: int,
     utterances: list[dict[str, Any]],
     draft: dict[str, Any],
+    imaging_evidence: list[dict[str, Any]] | None = None,
+    openai_model: str = "",
 ) -> str:
     evidence_digest = _evidence_digest(
         checkin_id=checkin_id,
@@ -263,6 +234,13 @@ def _issue_checkin_token(
             "openai_response_id": openai_response_id,
             "patient_speaker": patient_speaker,
             "evidence_digest": evidence_digest,
+            "imaging_evidence_ids": [
+                str(item.get("diagnostic_report_id") or "")
+                for item in imaging_evidence or []
+                if item.get("diagnostic_report_id")
+            ],
+            "imaging_evidence_digest": _imaging_evidence_digest(imaging_evidence or []),
+            "openai_model": openai_model,
             "expires_at": int(time.time()) + _CHECKIN_TOKEN_TTL_SECONDS,
         },
         ensure_ascii=True,
@@ -323,7 +301,33 @@ def _evidence_digest(
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _verify_checkin_token(patient_id: str, payload: DemoConfirmIn) -> None:
+def _imaging_evidence_digest(items: list[dict[str, Any]]) -> str:
+    normalized = sorted(
+        (
+            {
+                "diagnostic_report_id": str(item.get("diagnostic_report_id") or ""),
+                "imaging_study_ids": sorted(str(value) for value in item.get("imaging_study_ids") or []),
+                "issued": str(item.get("issued") or "") or None,
+                "summary": str(item.get("summary") or ""),
+                "reviewer_id": str(item.get("reviewer_id") or "") or None,
+                "reviewer_name": str(item.get("reviewer_name") or "") or None,
+                "reviewed_at": str(item.get("reviewed_at") or "") or None,
+                "report_version_id": str(item.get("report_version_id") or "") or None,
+            }
+            for item in items
+        ),
+        key=lambda item: item["diagnostic_report_id"],
+    )
+    canonical = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _verify_checkin_token(patient_id: str, payload: DemoConfirmIn) -> dict[str, Any]:
     source = _decode_checkin_token(payload.checkin_token)
     scalar_expected = {
         "checkin_id": payload.checkin_id,
@@ -345,6 +349,7 @@ def _verify_checkin_token(patient_id: str, payload: DemoConfirmIn) -> None:
             "The confirmation no longer matches the provider-produced check-in evidence.",
             status_code=409,
         )
+    return source
 
 
 def _validate_reviewed_draft(payload: DemoConfirmIn) -> PrevisitDraft:
@@ -358,7 +363,69 @@ def _validate_reviewed_draft(payload: DemoConfirmIn) -> PrevisitDraft:
     )
 
 
-def _snapshot_documents(snapshot: dict[str, Any], utterances: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _accepted_imaging_evidence(patient_id: str) -> list[dict[str, Any]]:
+    """Return only clinician-accepted imaging reports for retrieval and provenance."""
+    repo = repository()
+    try:
+        reports = repo.client.search(
+            "DiagnosticReport",
+            {
+                "subject": f"Patient/{patient_id}",
+                "status": "final",
+                "_count": 10,
+                "_sort": "-_lastUpdated",
+            },
+        )
+    except MedplumError as exc:
+        raise SponsorIntegrationError(
+            "medplum",
+            f"Accepted imaging context could not be loaded: {exc}",
+            status_code=503 if exc.status_code in {401, 403} else 502,
+        ) from exc
+
+    accepted: list[dict[str, Any]] = []
+    for report in reports:
+        tags = (report.get("meta") or {}).get("tag") or []
+        decision, _ = repo.report_review(report)
+        reviewer = repo.report_reviewer(report)
+        if decision != "accepted" or any(
+            isinstance(tag, dict) and tag.get("code") == "ai-extracted-unverified"
+            for tag in tags
+        ) or not reviewer.get("reviewer_id") or not reviewer.get("reviewer_name"):
+            continue
+        view = repo.diagnostic_report_view(report)
+        summary = "\n".join(
+            str(view.get(key) or "").strip()
+            for key in ("summary", "findings", "impression", "recommendation")
+            if str(view.get(key) or "").strip()
+        )
+        report_id = str(report.get("id") or "")
+        if not report_id or not summary:
+            continue
+        accepted.append(
+            {
+                "diagnostic_report_id": report_id,
+                "imaging_study_ids": [
+                    str(item.get("reference") or "").removeprefix("ImagingStudy/")
+                    for item in report.get("imagingStudy") or []
+                    if isinstance(item, dict) and item.get("reference")
+                ],
+                "issued": str(report.get("issued") or "") or None,
+                "summary": summary[:4_000],
+                "reviewer_id": reviewer["reviewer_id"],
+                "reviewer_name": reviewer["reviewer_name"],
+                "reviewed_at": reviewer.get("reviewed_at"),
+                "report_version_id": str((report.get("meta") or {}).get("versionId") or "") or None,
+            }
+        )
+    return accepted
+
+
+def _snapshot_documents(
+    snapshot: dict[str, Any],
+    utterances: list[dict[str, Any]],
+    imaging_evidence: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     patient = snapshot.get("patient") or {}
     patient_id = str(patient.get("id") or "")
     docs: list[dict[str, Any]] = [
@@ -395,6 +462,18 @@ def _snapshot_documents(snapshot: dict[str, Any], utterances: list[dict[str, Any
             },
         }
         for item in utterances
+    )
+    docs.extend(
+        {
+            "id": f"diagnostic-report-{item['diagnostic_report_id']}",
+            "text": str(item["summary"]),
+            "metadata": {
+                "patient_id": patient_id,
+                "source": "accepted_imaging_report",
+                "fhir_resource_id": str(item["diagnostic_report_id"]),
+            },
+        }
+        for item in imaging_evidence or []
     )
     return docs
 
@@ -441,16 +520,19 @@ async def create_checkin(
                 status_code=422,
             )
         checkin_id = str(uuid.uuid4())
+        imaging_evidence = await asyncio.to_thread(_accepted_imaging_evidence, patient_id)
         moss = await retrieve_context(
             patient_id=patient_id,
             checkin_id=checkin_id,
-            documents=_snapshot_documents(snapshot.model_dump(mode="json"), deepgram["utterances"]),
+            documents=_snapshot_documents(
+                snapshot.model_dump(mode="json"), deepgram["utterances"], imaging_evidence
+            ),
             query=(
                 "What changed in medication adherence, allergies, worsening biometrics, and unresolved "
                 "follow-up questions during today's pre-visit check-in?"
             ),
         )
-        draft, openai_response_id = await create_previsit_draft(
+        draft, openai_response_id, openai_model = await create_previsit_draft(
             utterances=patient_utterances, retrieval=moss["evidence"]
         )
     except SponsorIntegrationError as exc:
@@ -470,9 +552,13 @@ async def create_checkin(
             patient_speaker=patient_speaker,
             utterances=deepgram["utterances"],
             draft=draft.model_dump(mode="json"),
+            imaging_evidence=imaging_evidence,
+            openai_model=openai_model,
         ),
         utterances=deepgram["utterances"],
         moss=moss,
+        imaging_evidence=imaging_evidence,
+        openai_model=openai_model,
         draft=draft.model_dump(mode="json"),
     )
 
@@ -552,6 +638,8 @@ def _fhir_resources(
     payload: DemoConfirmIn,
     operator: DemoOperator,
     note_text: str,
+    imaging_evidence: list[dict[str, Any]] | None = None,
+    openai_model: str = "",
 ) -> list[tuple[str, dict[str, Any]]]:
     now = datetime.now(timezone.utc).isoformat()
     patient = patient_reference(patient_id)
@@ -562,10 +650,13 @@ def _fhir_resources(
         "checkin_id": payload.checkin_id,
         "deepgram_request_id": payload.deepgram_request_id,
         "openai_response_id": payload.openai_response_id,
+        "openai_model": openai_model,
         "patient_speaker": payload.patient_speaker,
         "operator_id": operator.operator_id,
         "clinician_name": operator.display_name,
         "evidence_utterances": _approved_utterances(payload),
+        "transcript_utterances": [item.model_dump(mode="json") for item in payload.utterances],
+        "imaging_evidence": imaging_evidence or [],
         "draft": payload.draft.model_dump(mode="json"),
         "review_audit": _review_audit(payload),
         "approved_at": now,
@@ -700,6 +791,14 @@ def _fhir_resources(
                 "identifier": common["identifier"],
                 "patient": common["subject"],
                 "note": common["note"],
+                "clinicalStatus": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+                            "code": "active",
+                        }
+                    ]
+                },
                 "verificationStatus": {
                     "coding": [
                         {
@@ -952,13 +1051,12 @@ async def confirm_checkin(
     if not payload.approved:
         raise HTTPException(status_code=409, detail="No FHIR write occurs until the clinician approves.")
     try:
-        _verify_checkin_token(patient_id, payload)
+        token_context = _verify_checkin_token(patient_id, payload)
         draft = _validate_reviewed_draft(payload)
         payload.draft = payload.draft.model_validate(draft.model_dump(mode="json"))
     except SponsorIntegrationError as exc:
         _raise_sponsor(exc)
 
-    note_text = _note_text(payload, operator)
     existing = await asyncio.to_thread(_find_checkin_document, patient_id, payload.checkin_id)
     if existing:
         metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
@@ -977,6 +1075,39 @@ async def confirm_checkin(
             return _saved_confirmation(existing, payload, operator)
     else:
         metadata = {}
+
+    signed_imaging_ids = {
+        str(value)
+        for value in token_context.get("imaging_evidence_ids") or []
+        if value
+    }
+    imaging_evidence: list[dict[str, Any]] = []
+    if signed_imaging_ids:
+        try:
+            imaging_evidence = [
+                item
+                for item in await asyncio.to_thread(_accepted_imaging_evidence, patient_id)
+                if item["diagnostic_report_id"] in signed_imaging_ids
+            ]
+            if {item["diagnostic_report_id"] for item in imaging_evidence} != signed_imaging_ids:
+                raise SponsorIntegrationError(
+                    "workflow",
+                    "Accepted imaging provenance changed before clinician approval.",
+                    status_code=409,
+                )
+            if not hmac.compare_digest(
+                str(token_context.get("imaging_evidence_digest") or ""),
+                _imaging_evidence_digest(imaging_evidence),
+            ):
+                raise SponsorIntegrationError(
+                    "workflow",
+                    "Accepted imaging content changed after the OpenAI draft was created.",
+                    status_code=409,
+                )
+        except SponsorIntegrationError as exc:
+            _raise_sponsor(exc)
+
+    note_text = _note_text(payload, operator)
     validations = metadata.get("validations") if isinstance(metadata.get("validations"), list) else []
     resources = (
         metadata.get("medplum_resources")
@@ -985,7 +1116,14 @@ async def confirm_checkin(
     )
     if not resources:
         try:
-            fhir_pairs = _fhir_resources(patient_id, payload, operator, note_text)
+            fhir_pairs = _fhir_resources(
+                patient_id,
+                payload,
+                operator,
+                note_text,
+                imaging_evidence=imaging_evidence,
+                openai_model=str(token_context.get("openai_model") or ""),
+            )
             fhir_resources = [resource for _, resource in fhir_pairs]
             medplum = MedplumClient()
             await medplum.assert_synthetic_patient(patient_id)
@@ -1211,16 +1349,28 @@ async def readiness(
         raise HTTPException(status_code=404, detail="No approved pre-visit reconstruction exists.")
     metadata = _completed_metadata(document)
     draft = metadata.get("draft") if isinstance(metadata.get("draft"), dict) else {}
+    checkin_id = str(metadata.get("checkin_id") or document.get("doc_id") or "")
+    saved_eligibility = metadata.get("eligibility")
     return DemoReadinessOut(
-        checkin_id=str(metadata.get("checkin_id") or document.get("doc_id") or ""),
+        checkin_id=checkin_id,
         patient_id=patient_id,
         approved_at=str(metadata.get("approved_at") or document.get("uploaded_at") or ""),
         clinician_name=str(metadata.get("clinician_name") or ""),
         what_changed=draft.get("proposed_changes") or [],
         clinician_verification=draft.get("clinician_verification") or [],
         unresolved_questions=draft.get("unresolved_questions") or [],
-        utterances=metadata.get("evidence_utterances") or [],
+        utterances=metadata.get("transcript_utterances") or metadata.get("evidence_utterances") or [],
         resources=metadata.get("medplum_resources") or [],
+        validations=metadata.get("validations") or [],
+        imaging_evidence=metadata.get("imaging_evidence") or [],
+        deepgram_request_id=str(metadata.get("deepgram_request_id") or ""),
+        openai_response_id=str(metadata.get("openai_response_id") or ""),
+        openai_model=str(metadata.get("openai_model") or "unknown"),
+        document_id=str(document.get("doc_id") or ""),
         validation_status=metadata["validation_status"],
-        eligibility=metadata.get("eligibility") if isinstance(metadata.get("eligibility"), dict) else None,
+        eligibility=(
+            DemoEligibilityOut(checkin_id=checkin_id, **saved_eligibility)
+            if isinstance(saved_eligibility, dict) and saved_eligibility.get("medplum_resource")
+            else None
+        ),
     )

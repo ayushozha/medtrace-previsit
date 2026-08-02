@@ -294,6 +294,17 @@ class MossRetrievalOut(BaseModel):
     persisted: bool = False
 
 
+class ImagingEvidenceOut(BaseModel):
+    diagnostic_report_id: str = Field(min_length=1, max_length=128)
+    imaging_study_ids: list[str] = Field(default_factory=list, max_length=10)
+    issued: str | None = None
+    summary: str = Field(min_length=1, max_length=4_000)
+    reviewer_id: str | None = None
+    reviewer_name: str | None = None
+    reviewed_at: str | None = None
+    report_version_id: str | None = None
+
+
 DemoChangeKind = Literal["medication_adherence", "allergy_confirmation", "follow_up"]
 DemoText = Annotated[str, Field(min_length=1, max_length=1_000)]
 
@@ -331,6 +342,8 @@ class DemoCheckinOut(BaseModel):
     checkin_token: str
     utterances: list[TranscriptUtteranceOut] = Field(max_length=80)
     moss: MossRetrievalOut
+    imaging_evidence: list[ImagingEvidenceOut] = Field(default_factory=list)
+    openai_model: str
     draft: PrevisitDraftOut
     write_status: Literal["not_written"] = "not_written"
 
@@ -414,8 +427,14 @@ class DemoReadinessOut(BaseModel):
     unresolved_questions: list[str] = Field(default_factory=list)
     utterances: list[TranscriptUtteranceOut] = Field(default_factory=list)
     resources: list[FhirResourceOut] = Field(default_factory=list)
+    validations: list[FhirValidationOut] = Field(default_factory=list)
+    imaging_evidence: list[ImagingEvidenceOut] = Field(default_factory=list)
+    deepgram_request_id: str
+    openai_response_id: str
+    openai_model: str
+    document_id: str
     validation_status: Literal["passed"]
-    eligibility: dict[str, Any] | None = None
+    eligibility: DemoEligibilityOut | None = None
 
 
 # ---- Imaging (DICOM studies, segmentation, draft reports) --------------------

@@ -99,7 +99,10 @@ The YC flow uses `YC_DEMO_PATIENT_ID` as the canonical FHIR Patient ID. A tagged
 `DocumentReference` is its approval/readiness journal, and a durable
 `zep-demo-projection` Task projects the approved note without blocking canonical
 Medplum reads. The operator token is workflow-specific, not app-wide auth; this
-repository must use an isolated synthetic-only Medplum project.
+repository must use an isolated synthetic-only Medplum project. Imaging report
+review (`POST /api/studies/{study_id}/reports/review`) shares that operator gate,
+persists the server-owned reviewer identity, and is required before a report can
+enter the YC demo's Moss/OpenAI context.
 
 Dashboard fields are now mapped deterministically from `Condition`, `MedicationStatement`,
 `AllergyIntolerance`, `Observation`, `Encounter`, `DocumentReference`, and `Provenance` in one

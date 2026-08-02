@@ -82,6 +82,7 @@ export function requestReport(
 export function reviewReport(
   studyId: string,
   decision: 'accepted' | 'needs-correction',
+  accessToken: string,
   note?: string,
 ): Promise<{
   decision: 'accepted' | 'needs-correction';
@@ -89,7 +90,12 @@ export function reviewReport(
   fhir_diagnostic_report_id: string;
   fhir_task_id: string;
 }> {
-  return apiPost(`/api/studies/${studyId}/reports/review`, { decision, note: note || null });
+  return apiPost(
+    `/api/studies/${studyId}/reports/review`,
+    { decision, note: note || null },
+    undefined,
+    { 'X-MedTrace-Demo-Token': accessToken },
+  );
 }
 
 /** Report-provider status, read from the `imaging` block of the shared health route. */

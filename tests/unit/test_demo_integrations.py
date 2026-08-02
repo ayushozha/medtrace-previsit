@@ -4,13 +4,14 @@ import asyncio
 import base64
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 
-from apps.api.routers import demo
+from apps.api.routers import demo, studies
 from apps.api.schemas import DemoConfirmIn
 from medtrace_agent.agents.previsit import PrevisitDraft, ProposedChange, validate_evidence
 from medtrace_agent.integrations import deepgram, medplum, moss_retrieval, stedi
@@ -116,6 +117,61 @@ def test_demo_auth_precedes_chart_access(monkeypatch: pytest.MonkeyPatch) -> Non
     assert data_layer_calls == 0
 
 
+def test_imaging_review_requires_authenticated_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MEDPLUM_BASE_URL", "http://medplum.test")
+    monkeypatch.setenv("MEDPLUM_CLIENT_ID", "client")
+    monkeypatch.setenv("MEDPLUM_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("YC_DEMO_ACCESS_TOKEN", "different-test-access-token-with-32-characters")
+    monkeypatch.setenv("YC_DEMO_OPERATOR_ID", "operator-1")
+    monkeypatch.setenv("YC_DEMO_OPERATOR_NAME", "Dr. Reviewer")
+    data_layer_calls = 0
+
+    def fail_if_called(_study_id: str) -> dict[str, Any]:
+        nonlocal data_layer_calls
+        data_layer_calls += 1
+        raise AssertionError("Unauthenticated imaging review reached Medplum")
+
+    monkeypatch.setattr(studies, "_synthetic_study_or_404", fail_if_called)
+    test_app = FastAPI()
+    test_app.include_router(studies.router)
+
+    async def request(headers: dict[str, str]) -> int:
+        transport = httpx.ASGITransport(app=test_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/studies/study-1/reports/review",
+                json={"decision": "accepted", "note": None},
+                headers=headers,
+            )
+            return response.status_code
+
+    assert asyncio.run(request({})) == 401
+    assert asyncio.run(request({"X-MedTrace-Demo-Token": "wrong-token"})) == 403
+    assert data_layer_calls == 0
+
+
+def test_study_view_hides_acceptance_without_reviewer_provenance() -> None:
+    class Repo:
+        @staticmethod
+        def report_review(_report: dict[str, Any]) -> tuple[str, None]:
+            return "accepted", None
+
+        @staticmethod
+        def report_reviewer(report: dict[str, Any]) -> dict[str, str | None]:
+            return report.get("reviewer") or {
+                "reviewer_id": None,
+                "reviewer_name": None,
+            }
+
+    report = {"id": "report-1"}
+    assert studies._trusted_report_review(Repo(), report) == ("unreviewed", None)  # noqa: SLF001
+
+    report["reviewer"] = {"reviewer_id": "operator-1", "reviewer_name": "Dr. Reviewer"}
+    assert studies._trusted_report_review(Repo(), report) == ("accepted", None)  # noqa: SLF001
+
+
 def test_evidence_validator_preserves_exact_deepgram_text() -> None:
     draft = validate_evidence(_draft(), [_utterance()])
     assert draft.proposed_changes[0].evidence_quote == "miss my metformin after overnight shifts"
@@ -126,6 +182,155 @@ def test_evidence_validator_rejects_an_unsupported_quote() -> None:
     draft.proposed_changes[0].evidence_quote = "a quote that was never spoken"
     with pytest.raises(SponsorIntegrationError, match="not an exact Deepgram transcript quote"):
         validate_evidence(draft, [_utterance()])
+
+
+def test_only_accepted_imaging_reports_enter_demo_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accepted = {
+        "id": "report-accepted",
+        "status": "final",
+        "meta": {"versionId": "3"},
+        "issued": "2026-08-01T12:00:00Z",
+        "imagingStudy": [{"reference": "ImagingStudy/study-1"}],
+        "extension": [{"url": "review-decision", "valueCode": "accepted"}],
+    }
+    unreviewed = {
+        "id": "report-unreviewed",
+        "status": "preliminary",
+        "meta": {"tag": [{"code": "ai-extracted-unverified"}]},
+    }
+    forged_acceptance = {
+        "id": "report-without-reviewer",
+        "status": "final",
+        "extension": [{"url": "review-decision", "valueCode": "accepted"}],
+    }
+
+    class FakeClient:
+        @staticmethod
+        def search(resource_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+            assert resource_type == "DiagnosticReport"
+            assert params["subject"] == "Patient/chart-1"
+            return [accepted, forged_acceptance, unreviewed]
+
+    class FakeRepo:
+        client = FakeClient()
+
+        @staticmethod
+        def report_review(report: dict[str, Any]) -> tuple[str, None]:
+            return (
+                "accepted"
+                if report.get("id") in {"report-accepted", "report-without-reviewer"}
+                else "unreviewed",
+                None,
+            )
+
+        @staticmethod
+        def report_reviewer(report: dict[str, Any]) -> dict[str, str | None]:
+            return (
+                {
+                    "reviewer_id": "operator-1",
+                    "reviewer_name": "Dr. Reviewer",
+                    "reviewed_at": "2026-08-01T12:05:00Z",
+                }
+                if report.get("id") == "report-accepted"
+                else {"reviewer_id": None, "reviewer_name": None, "reviewed_at": None}
+            )
+
+        @staticmethod
+        def diagnostic_report_view(report: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Reviewed chest MRI.",
+                "findings": "No acute finding.",
+                "impression": "Stable appearance.",
+                "recommendation": "Correlate clinically.",
+            }
+
+    monkeypatch.setattr(demo, "repository", lambda: FakeRepo())
+    evidence = demo._accepted_imaging_evidence("chart-1")  # noqa: SLF001
+    assert evidence == [
+        {
+            "diagnostic_report_id": "report-accepted",
+            "imaging_study_ids": ["study-1"],
+            "issued": "2026-08-01T12:00:00Z",
+            "summary": (
+                "Reviewed chest MRI.\nNo acute finding.\nStable appearance.\nCorrelate clinically."
+            ),
+            "reviewer_id": "operator-1",
+            "reviewer_name": "Dr. Reviewer",
+            "reviewed_at": "2026-08-01T12:05:00Z",
+            "report_version_id": "3",
+        }
+    ]
+    documents = demo._snapshot_documents(  # noqa: SLF001
+        {"patient": {"id": "chart-1"}}, [_utterance()], evidence
+    )
+    assert documents[-1]["metadata"] == {
+        "patient_id": "chart-1",
+        "source": "accepted_imaging_report",
+        "fhir_resource_id": "report-accepted",
+    }
+    monkeypatch.setenv("YC_DEMO_CHECKIN_SIGNING_KEY", "test-signing-key-with-at-least-32-characters")
+    monkeypatch.setenv("YC_DEMO_ACCESS_TOKEN", "different-test-access-token-with-32-characters")
+    token = demo._issue_checkin_token(  # noqa: SLF001
+        checkin_id="checkin-1",
+        patient_id="chart-1",
+        deepgram_request_id="deepgram-1",
+        openai_response_id="openai-1",
+        patient_speaker=1,
+        utterances=[_utterance()],
+        draft=_draft().model_dump(mode="json"),
+        imaging_evidence=evidence,
+        openai_model="deployment-selected-model",
+    )
+    assert len(token) <= 2_048
+    decoded = demo._decode_checkin_token(token)  # noqa: SLF001
+    assert decoded["imaging_evidence_ids"] == ["report-accepted"]
+    assert decoded["imaging_evidence_digest"] == demo._imaging_evidence_digest(evidence)  # noqa: SLF001
+    assert "imaging_evidence" not in decoded
+
+
+def test_confirm_rejects_same_imaging_id_with_changed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _confirm_payload(monkeypatch)
+    original_evidence = [
+        {
+            "diagnostic_report_id": "report-1",
+            "imaging_study_ids": ["study-1"],
+            "issued": "2026-08-01T12:00:00Z",
+            "summary": "Accepted report content seen by OpenAI.",
+        }
+    ]
+    payload.checkin_token = demo._issue_checkin_token(  # noqa: SLF001
+        checkin_id=payload.checkin_id,
+        patient_id="chart-1",
+        deepgram_request_id=payload.deepgram_request_id,
+        openai_response_id=payload.openai_response_id,
+        patient_speaker=payload.patient_speaker,
+        utterances=[item.model_dump(mode="json") for item in payload.utterances],
+        draft=payload.source_draft.model_dump(mode="json"),
+        imaging_evidence=original_evidence,
+        openai_model="deployment-selected-model",
+    )
+    changed_evidence = [{**original_evidence[0], "summary": "Edited after the draft."}]
+    monkeypatch.setattr(demo, "_enforce_sponsor_rate_limit", lambda *_: None)
+    monkeypatch.setattr(demo, "_find_checkin_document", lambda *_, **__: None)
+    monkeypatch.setattr(demo, "_accepted_imaging_evidence", lambda *_: changed_evidence)
+
+    class FailIfCalled:
+        def __init__(self) -> None:
+            raise AssertionError("FHIR validation must not run after imaging provenance changes")
+
+    monkeypatch.setattr(demo, "MedplumClient", FailIfCalled)
+    with pytest.raises(HTTPException) as changed:
+        asyncio.run(
+            demo.confirm_checkin(
+                "chart-1", payload, _operator(), {"zep_user_id": "synthetic-user"}
+            )
+        )
+    assert changed.value.status_code == 409
+    assert "imaging content changed" in str(changed.value.detail)
 
 
 def test_deepgram_word_fallback_groups_only_explicit_speakers() -> None:
@@ -403,11 +608,69 @@ def test_fhir_resources_use_clinical_subject_and_proposal_semantics(
     assert medication["medicationCodeableConcept"]["text"] == "metformin"
     assert allergy["code"]["text"] == "penicillin"
     assert allergy["patient"] == {"reference": "Patient/patient-fhir-id"}
+    assert allergy["clinicalStatus"]["coding"][0]["code"] == "active"
     assert follow_up["intent"] == "proposal"
     assert projection["code"]["text"] == "zep-demo-projection"
     assert demo._conditional_identifier(questionnaire).endswith(  # noqa: SLF001
         "|checkin-1:questionnaire-response"
     )
+
+
+def test_reconstruction_persists_full_transcript_and_accepted_imaging_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("YC_DEMO_PATIENT_ID", "chart-1")
+    payload = _confirm_payload(monkeypatch)
+    payload.utterances.append(
+        type(payload.utterances[0]).model_validate(
+            {
+                "id": "dg-clinician",
+                "speaker": 0,
+                "start": 4.5,
+                "end": 5.5,
+                "text": "What should we follow up on?",
+                "confidence": 0.97,
+            }
+        )
+    )
+    resources = [
+        resource
+        for _, resource in demo._fhir_resources(  # noqa: SLF001
+            "chart-1",
+            payload,
+            _operator(),
+            "Approved reconstruction",
+            imaging_evidence=[
+                {
+                    "diagnostic_report_id": "report-1",
+                    "imaging_study_ids": ["study-1"],
+                    "issued": "2026-08-01T12:00:00Z",
+                    "summary": "Clinician-accepted MRI context.",
+                }
+            ],
+            openai_model="deployment-selected-model",
+        )
+    ]
+    journal = next(item for item in resources if item["resourceType"] == "DocumentReference")
+    metadata = demo._decode_document_json(journal)  # noqa: SLF001
+    assert [item["id"] for item in metadata["transcript_utterances"]] == [
+        "dg-1",
+        "dg-clinician",
+    ]
+    assert metadata["imaging_evidence"][0]["diagnostic_report_id"] == "report-1"
+    assert metadata["openai_model"] == "deployment-selected-model"
+
+
+def test_demo_ui_has_fast_canonical_replay_and_no_old_timing_copy() -> None:
+    root = Path(__file__).resolve().parents[2]
+    page = (root / "apps/web/src/components/demo/YcMedplumHackathonDemo.tsx").read_text(encoding="utf-8")
+    dialog = (root / "apps/web/src/components/demo/PreVisitCheckinDialog.tsx").read_text(encoding="utf-8")
+    combined = f"{page}\n{dialog}"
+    assert "Video target 2:45" not in combined
+    assert "2:45 demo path" not in combined
+    assert "30–40 second" not in combined
+    assert "Open latest saved reconstruction" in dialog
+    assert "DiagnosticReport/" in combined
 
 
 def test_operator_token_and_signing_key_must_be_separate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -632,6 +895,71 @@ def test_incomplete_workflow_cannot_report_readiness(monkeypatch: pytest.MonkeyP
             )
         )
     assert incomplete.value.status_code == 409
+
+
+def test_readiness_reconstructs_complete_saved_provider_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = {
+        "diagnostic_report_id": "report-1",
+        "imaging_study_ids": ["study-1"],
+        "issued": "2026-08-01T12:00:00Z",
+        "summary": "Clinician-accepted imaging context.",
+    }
+    eligibility = {
+        "transaction_id": "stedi-1",
+        "trace_id": "trace-1",
+        "application_mode": "test",
+        "coverage_active": True,
+        "plan_status": [],
+        "benefits": [],
+        "patient_responsibility_summary": "Qualified test-mode benefits only.",
+        "disclaimer": "Synthetic test data.",
+        "medplum_resource": {
+            "resource_type": "DocumentReference",
+            "resource_id": "eligibility-1",
+            "version_id": "1",
+            "location": None,
+            "status": "201",
+        },
+    }
+    row = {
+        "doc_id": "journal-1",
+        "uploaded_at": "2026-08-01T12:00:00Z",
+        "metadata": {
+            "yc_demo_checkin": True,
+            "checkin_id": "checkin-1",
+            "approved_at": "2026-08-01T12:00:00Z",
+            "clinician_name": "Dr. Reviewer",
+            "deepgram_request_id": "deepgram-1",
+            "openai_response_id": "openai-1",
+            "openai_model": "deployment-selected-model",
+            "draft": _draft().model_dump(mode="json"),
+            "transcript_utterances": [_utterance()],
+            "imaging_evidence": [evidence],
+            "workflow_state": "complete",
+            "validation_status": "passed",
+            "validations": [{"resource_type": "Encounter", "valid": True, "notices": []}],
+            "medplum_resources": [
+                {"resource_type": "Encounter", "resource_id": "encounter-1", "status": "201"}
+            ],
+            "eligibility": eligibility,
+        },
+    }
+    monkeypatch.setattr(demo, "_find_checkin_document", lambda *_, **__: row)
+
+    result = asyncio.run(
+        demo.readiness("chart-1", _operator(), {"zep_user_id": "synthetic-user"})
+    )
+
+    assert result.document_id == "journal-1"
+    assert result.deepgram_request_id == "deepgram-1"
+    assert result.openai_response_id == "openai-1"
+    assert result.openai_model == "deployment-selected-model"
+    assert [item.id for item in result.utterances] == ["dg-1"]
+    assert result.validations[0].valid is True
+    assert result.imaging_evidence[0].diagnostic_report_id == "report-1"
+    assert result.eligibility and result.eligibility.transaction_id == "stedi-1"
 
 
 def test_medplum_validation_rejects_error_operation_outcome() -> None:

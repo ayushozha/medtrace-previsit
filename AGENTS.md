@@ -259,7 +259,9 @@ is configured to a same-origin proxy.
   caller authentication; they reject patients without the MedTrace `synthetic`
   tag, but this is not identity or RBAC. Never connect this demo to a PHI-bearing
   Medplum project. Use a least-privilege ClientApplication scoped to an isolated
-  synthetic-only project. The YC operator token protects its workflow routes.
+  synthetic-only project. The YC operator token protects its workflow routes and
+  imaging-report review; only accepted reports with server-owned reviewer
+  provenance may enter the YC Moss/OpenAI context.
 - **Demo-grade output**: vision ingest can misread numbers or hallucinate
   structured fields; agent output is non-diagnostic clinical decision support,
   not a medical device. Preserve those disclaimers in code and UI.

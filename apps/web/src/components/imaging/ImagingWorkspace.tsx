@@ -83,6 +83,7 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
   const [layout, setLayout] = useState<'stack' | 'mpr'>('stack');
   const [imagingStatus, setImagingStatus] = useState<ImagingStatus>(MOCK_STATUS);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [reviewAccessToken, setReviewAccessToken] = useState('');
   const patientLocked = Boolean(patientId);
   const patientName =
     patients.find((p) => p.id === (patientId ?? selectedPatientId))?.name ?? 'Patient';
@@ -102,6 +103,7 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
     setSliceIndex(0);
     setLayout('stack');
     setFeedbackOpen(false);
+    setReviewAccessToken('');
     setSelectedPatientId(nextPatientId);
   }, []);
 
@@ -113,7 +115,9 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
     const controller = new AbortController();
     fetchImagingStatus(controller.signal)
       .then(setImagingStatus)
-      .catch(() => setImagingStatus(MOCK_STATUS));
+      .catch(() => {
+        if (!controller.signal.aborted) setImagingStatus(MOCK_STATUS);
+      });
     return () => controller.abort();
   }, []);
 
@@ -132,13 +136,18 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
     fetchStudies(controller.signal, selectedPatientId)
       .then((rows) => {
         const canonical = rows.map(toStudy);
+        setUploadError(null);
         setStudies(canonical);
         setActiveStudyId(canonical[0]?.id ?? null);
         setVoi(null);
         setSliceIndex(0);
         setLayout('stack');
       })
-      .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not load Medplum studies.'));
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          setUploadError(error instanceof Error ? error.message : 'Could not load Medplum studies.');
+        }
+      });
     return () => controller.abort();
   }, [selectedPatientId]);
 
@@ -217,7 +226,13 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
         body_part: study.body_part,
         segmentations: study.segmentations,
       });
-      updateStudy(studyId, (s) => ({ ...s, status: 'ready', report }));
+      updateStudy(studyId, (s) => ({
+        ...s,
+        status: 'ready',
+        report,
+        reviewDecision: 'unreviewed',
+        reviewNote: undefined,
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Report service is unavailable.';
       setUploadError(`Report generation failed: ${message}`);
@@ -282,15 +297,20 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
             imagingStatus={imagingStatus}
             study={study}
             canRunReport={hasLoadedStudy}
+            reviewAccessToken={reviewAccessToken}
             onAccept={() => {
-              reviewReport(study.id, 'accepted')
-                .then(() => updateStudy(study.id, (s) => ({ ...s, reviewDecision: 'accepted', reviewNote: undefined })))
+              reviewReport(study.id, 'accepted', reviewAccessToken)
+                .then(() => {
+                  setReviewAccessToken('');
+                  updateStudy(study.id, (s) => ({ ...s, reviewDecision: 'accepted', reviewNote: undefined }));
+                })
                 .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not save review.'));
             }}
             onNeedsCorrection={() => {
               setFeedbackOpen(true);
             }}
             onRunReport={runReport}
+            onReviewAccessTokenChange={setReviewAccessToken}
           />
         </div>
       </div>
@@ -300,14 +320,15 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
         study={study}
         onOpenChange={setFeedbackOpen}
         onSave={(note) => {
-          reviewReport(study.id, 'needs-correction', note)
-            .then(() =>
+          reviewReport(study.id, 'needs-correction', reviewAccessToken, note)
+            .then(() => {
+              setReviewAccessToken('');
               updateStudy(study.id, (s) => ({
                 ...s,
                 reviewDecision: 'needs-correction',
                 reviewNote: note || undefined,
-              })),
-            )
+              }));
+            })
             .catch((error) => setUploadError(error instanceof Error ? error.message : 'Could not save review.'));
         }}
       />

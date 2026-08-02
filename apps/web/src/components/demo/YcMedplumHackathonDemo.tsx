@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Loader2, Mic, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { FileCheck2, Loader2, Mic, ScanLine, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import { DashboardHome } from '@/components/DashboardHome';
 import { PreVisitCheckinDialog } from '@/components/demo/PreVisitCheckinDialog';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { getDemoStatus, type DemoStatus } from '@/lib/demoApi';
+import { fetchStudies } from '@/lib/imagingApi';
+import type { StudyUpload } from '@/lib/types';
 
 const FINAL_PROMPT =
   'What changed today, what should the clinician verify, and what evidence supports it?';
@@ -12,6 +15,7 @@ const FINAL_PROMPT =
 export function YcMedplumHackathonDemo() {
   const [status, setStatus] = useState<DemoStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [acceptedImaging, setAcceptedImaging] = useState<StudyUpload | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -22,6 +26,22 @@ export function YcMedplumHackathonDemo() {
   }, []);
 
   const patientId = status?.demo_patient_id ?? null;
+
+  useEffect(() => {
+    if (!patientId) return;
+    const controller = new AbortController();
+    fetchStudies(controller.signal, patientId)
+      .then((studies) =>
+        setAcceptedImaging(
+          studies.find(
+            (study) =>
+              study.review_decision === 'accepted' && Boolean(study.report?.fhir_diagnostic_report_id),
+          ) ?? null,
+        ),
+      )
+      .catch(() => setAcceptedImaging(null));
+    return () => controller.abort();
+  }, [patientId]);
 
   if (!status && !statusError) {
     return (
@@ -53,7 +73,7 @@ export function YcMedplumHackathonDemo() {
   return (
     <>
       <div className="mx-auto w-full max-w-[1440px] px-4 pt-4 sm:px-6 lg:px-8">
-        <div className="clinical-panel flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="clinical-panel flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-primary">
               <ShieldCheck size={17} />
@@ -61,13 +81,24 @@ export function YcMedplumHackathonDemo() {
             <div>
               <p className="clinical-section-title">YC Medplum hackathon flow</p>
               <p className="mt-1 text-xs text-slate-600">
-                Existing chart → evidence-linked check-in → clinician approval → FHIR → eligibility
+                Longitudinal chart → accepted 3D imaging → evidence-linked check-in → validated FHIR → eligibility
               </p>
             </div>
           </div>
-          <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-            Video target 2:45 · hard stop before 3:00
-          </span>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5">
+              <FileCheck2 size={13} className={acceptedImaging ? 'text-emerald-600' : 'text-amber-500'} />
+              {acceptedImaging
+                ? `${acceptedImaging.modality} ${acceptedImaging.body_part} · DiagnosticReport/${acceptedImaging.report?.fhir_diagnostic_report_id}`
+                : 'No clinician-accepted imaging report yet'}
+            </span>
+            <Link
+              className={buttonVariants({ size: 'sm', variant: 'outline' })}
+              to={`/patients/${patientId}/imaging`}
+            >
+              <ScanLine size={14} /> Open 3D imaging
+            </Link>
+          </div>
         </div>
       </div>
 
@@ -75,9 +106,17 @@ export function YcMedplumHackathonDemo() {
         key={`${patientId}-${refreshKey}`}
         patientId={patientId}
         headerAction={
-          <Button size="lg" onClick={() => setDialogOpen(true)}>
-            <Mic size={14} /> Start pre-visit check-in
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              className={buttonVariants({ size: 'lg', variant: 'outline' })}
+              to={`/patients/${patientId}/imaging`}
+            >
+              <ScanLine size={14} /> Review 3D imaging
+            </Link>
+            <Button size="lg" onClick={() => setDialogOpen(true)}>
+              <Mic size={14} /> Start pre-visit check-in
+            </Button>
+          </div>
         }
         suggestedPrompts={[FINAL_PROMPT]}
       />

@@ -52,6 +52,17 @@ export interface RetrievalEvidence {
   source: string;
 }
 
+export interface ImagingEvidence {
+  diagnostic_report_id: string;
+  imaging_study_ids: string[];
+  issued: string | null;
+  summary: string;
+  reviewer_id: string | null;
+  reviewer_name: string | null;
+  reviewed_at: string | null;
+  report_version_id: string | null;
+}
+
 export interface DemoCheckin {
   checkin_id: string;
   patient_id: string;
@@ -68,6 +79,8 @@ export interface DemoCheckin {
     evidence: RetrievalEvidence[];
     persisted: false;
   };
+  imaging_evidence: ImagingEvidence[];
+  openai_model: string;
   draft: PrevisitDraft;
   write_status: 'not_written';
 }
@@ -125,8 +138,14 @@ export interface DemoReadiness {
   unresolved_questions: string[];
   utterances: TranscriptUtterance[];
   resources: FhirResource[];
+  validations: Array<{ resource_type: string; valid: true; notices: string[] }>;
+  imaging_evidence: ImagingEvidence[];
+  deepgram_request_id: string;
+  openai_response_id: string;
+  openai_model: string;
+  document_id: string;
   validation_status: 'passed';
-  eligibility: Record<string, unknown> | null;
+  eligibility: DemoEligibility | null;
 }
 
 export const getDemoStatus = (signal?: AbortSignal) =>
