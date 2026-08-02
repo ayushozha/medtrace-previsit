@@ -38,18 +38,22 @@ interface DecisionPanelProps {
   study: Study;
   imagingStatus: ImagingStatus;
   canRunReport: boolean;
+  reviewAccessToken: string;
   onRunReport: () => void;
   onAccept: () => void;
   onNeedsCorrection: () => void;
+  onReviewAccessTokenChange: (value: string) => void;
 }
 
 export function DecisionPanel({
   study,
   imagingStatus,
   canRunReport,
+  reviewAccessToken,
   onRunReport,
   onAccept,
   onNeedsCorrection,
+  onReviewAccessTokenChange,
 }: DecisionPanelProps) {
   const reporting = study.status === 'reporting';
 
@@ -130,14 +134,26 @@ export function DecisionPanel({
       </div>
 
       <div className="grid shrink-0 gap-3 border-t border-slate-800 bg-[#090f18] p-4">
+        <label className="grid gap-1.5 text-xs text-slate-400">
+          Clinician operator access
+          <input
+            className="h-9 rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-cyan-400"
+            type="password"
+            autoComplete="off"
+            placeholder="Runtime token; never stored"
+            value={reviewAccessToken}
+            onChange={(event) => onReviewAccessTokenChange(event.target.value)}
+          />
+        </label>
         <button
           className={cn(
-            'flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition',
+            'flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-50',
             study.reviewDecision === 'accepted'
               ? 'bg-emerald-500 ring-2 ring-emerald-300/40'
               : 'bg-emerald-600 hover:bg-emerald-500',
           )}
           type="button"
+          disabled={reviewAccessToken.length < 32}
           onClick={onAccept}
         >
           <CheckCircle2 className="h-4 w-4" />
@@ -145,12 +161,13 @@ export function DecisionPanel({
         </button>
         <button
           className={cn(
-            'flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition',
+            'flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-50',
             study.reviewDecision === 'needs-correction'
               ? 'bg-red-500 ring-2 ring-red-300/40'
               : 'bg-red-600 hover:bg-red-500',
           )}
           type="button"
+          disabled={reviewAccessToken.length < 32}
           onClick={onNeedsCorrection}
         >
           <XCircle className="h-4 w-4" />

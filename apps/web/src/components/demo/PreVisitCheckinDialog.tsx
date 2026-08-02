@@ -5,8 +5,10 @@ import {
   CircleAlert,
   FileAudio,
   HeartHandshake,
+  History,
   Loader2,
   Mic,
+  ScanLine,
   ShieldCheck,
   Square,
   Upload,
@@ -253,12 +255,35 @@ export function PreVisitCheckinDialog({
     }
   };
 
+  const loadLatestReconstruction = async () => {
+    setStage('processing');
+    setError(null);
+    try {
+      const latest = await getDemoReadiness(patientId, accessToken);
+      setReadiness(latest);
+      setConfirmation({
+        checkin_id: latest.checkin_id,
+        approved: true,
+        validation_status: latest.validation_status,
+        validations: latest.validations,
+        resources: latest.resources,
+        document_id: latest.document_id,
+      });
+      setEligibility(latest.eligibility);
+      setStage('saved');
+    } catch (err) {
+      setError((err as Error).message);
+      setStage('capture');
+    }
+  };
+
   const runEligibility = async () => {
-    if (!checkin) return;
+    const checkinId = checkin?.checkin_id ?? readiness?.checkin_id;
+    if (!checkinId) return;
     setStage('eligibility');
     setError(null);
     try {
-      const result = await checkDemoEligibility(patientId, checkin.checkin_id, accessToken);
+      const result = await checkDemoEligibility(patientId, checkinId, accessToken);
       setEligibility(result);
       setReadiness(await getDemoReadiness(patientId, accessToken));
       setStage('saved');
@@ -294,16 +319,13 @@ export function PreVisitCheckinDialog({
     >
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl" showCloseButton={!isRecording}>
         <DialogHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3 pr-8">
+          <div className="pr-8">
             <div>
               <DialogTitle>Evidence-linked pre-visit check-in</DialogTitle>
               <DialogDescription className="mt-1">
                 No clinical FHIR write occurs until explicit clinician approval.
               </DialogDescription>
             </div>
-            <span className="rounded-md border border-blue-100 bg-blue-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-primary">
-              2:45 demo path
-            </span>
           </div>
         </DialogHeader>
 
@@ -345,7 +367,7 @@ export function PreVisitCheckinDialog({
                   </div>
                 ) : (
                   <p className="max-w-md text-center text-xs leading-5 text-slate-500">
-                    Use two genuine speakers in a 30–40 second synthetic consultation so Deepgram can prove diarization.
+                    Use a brief prerecorded synthetic conversation with two genuine speakers so Deepgram can prove diarization.
                   </p>
                 )}
               </div>
@@ -420,6 +442,16 @@ export function PreVisitCheckinDialog({
                 Held only in this dialog's memory and cleared when it closes. It is never bundled or stored in
                 browser storage.
               </p>
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-3 w-full"
+                disabled={accessToken.length < 32 || !status?.medplum.configured || stage === 'processing'}
+                onClick={() => void loadLatestReconstruction()}
+              >
+                {stage === 'processing' ? <Loader2 className="animate-spin" /> : <History />}
+                Open latest saved reconstruction
+              </Button>
               <div className="my-4 border-t border-slate-100" />
               <p className="clinical-section-title">Write gate</p>
               <div className="mt-3 space-y-3 text-xs leading-5 text-slate-600">
@@ -471,7 +503,7 @@ export function PreVisitCheckinDialog({
                   </span>
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500">
-                  {checkin.moss.time_taken_ms ?? '—'} ms · {checkin.moss.index_name}
+                  {checkin.moss.time_taken_ms ?? '—'} ms · {checkin.moss.index_name} · OpenAI {checkin.openai_model}
                 </p>
                 <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
                   {checkin.moss.evidence.map((item) => (
@@ -484,6 +516,27 @@ export function PreVisitCheckinDialog({
                     </article>
                   ))}
                 </div>
+                {checkin.imaging_evidence.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-cyan-100 bg-cyan-50 p-3">
+                    <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-cyan-800">
+                      <ScanLine size={12} /> Clinician-accepted imaging context
+                    </p>
+                    {checkin.imaging_evidence.map((item) => (
+                      <div key={item.diagnostic_report_id} className="mt-2">
+                        <p className="font-mono text-[10px] text-cyan-700">
+                          DiagnosticReport/{item.diagnostic_report_id}
+                        </p>
+                        {item.reviewer_name && (
+                          <p className="mt-1 text-[10px] text-cyan-800">
+                            Accepted by {item.reviewer_name}
+                            {item.report_version_id ? ` · v${item.report_version_id}` : ''}
+                          </p>
+                        )}
+                        <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-700">{item.summary}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -691,6 +744,48 @@ export function PreVisitCheckinDialog({
               </div>
             </section>
 
+            {readiness && (
+              <section className="rounded-xl border border-blue-100 bg-blue-50 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="clinical-section-title text-blue-700">Saved sponsor evidence</p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Reviewed by {readiness.clinician_name} · OpenAI {readiness.openai_model}
+                    </p>
+                  </div>
+                  <div className="space-y-1 text-right font-mono text-[10px] text-slate-500">
+                    <p>Deepgram {readiness.deepgram_request_id}</p>
+                    <p>OpenAI {readiness.openai_response_id}</p>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-3">
+                  {readiness.what_changed.map((change) => (
+                    <article key={`${change.title}-${change.evidence_utterance_id}`} className="rounded-lg border border-blue-100 bg-white p-3">
+                      <p className="text-xs font-semibold text-slate-900">{change.title}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-slate-600">{change.proposed_value}</p>
+                      <blockquote className="mt-2 border-l-2 border-blue-200 pl-2 text-[10px] leading-4 text-blue-800">
+                        {change.evidence_utterance_id}: “{change.evidence_quote}”
+                      </blockquote>
+                    </article>
+                  ))}
+                </div>
+                {readiness.unresolved_questions.length > 0 && (
+                  <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                    Unresolved: {readiness.unresolved_questions.join(' · ')}
+                  </p>
+                )}
+                {readiness.imaging_evidence.map((item) => (
+                  <p key={item.diagnostic_report_id} className="mt-3 flex items-start gap-2 rounded-lg border border-cyan-100 bg-cyan-50 p-2 text-xs text-cyan-950">
+                    <ScanLine size={14} className="mt-0.5 shrink-0" />
+                    <span className="line-clamp-3">
+                      Accepted imaging context · DiagnosticReport/{item.diagnostic_report_id}
+                      {item.reviewer_name ? ` · ${item.reviewer_name}` : ''}: {item.summary}
+                    </span>
+                  </p>
+                ))}
+              </section>
+            )}
+
             <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
               <div className="rounded-xl border border-slate-200 bg-white p-4">
                 <p className="clinical-section-title">Stedi test-mode eligibility</p>
@@ -764,8 +859,17 @@ export function PreVisitCheckinDialog({
                         {readiness.clinician_verification.map((item) => <li key={item}>{item}</li>)}
                       </ul>
                     </div>
+                    {readiness.unresolved_questions.length > 0 && (
+                      <div>
+                        <p className="font-semibold text-white">Still unresolved</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-4 text-amber-200">
+                          {readiness.unresolved_questions.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </div>
+                    )}
                     <p className="rounded-lg border border-slate-700 bg-slate-900 p-2 text-slate-300">
-                      Saved reconstruction: {readiness.checkin_id}
+                      Saved reconstruction: {readiness.checkin_id}<br />
+                      {readiness.utterances.length} diarized utterances · DocumentReference/{readiness.document_id}
                     </p>
                   </div>
                 ) : (

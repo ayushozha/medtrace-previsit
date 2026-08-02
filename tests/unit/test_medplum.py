@@ -417,6 +417,154 @@ def test_consultation_history_reconstructs_multiple_canonical_sessions() -> None
     assert rows[1]["duration"] == "1:05"
 
 
+def test_list_documents_excludes_internal_workflow_journals() -> None:
+    resources = {
+        "Task": [],
+        "DocumentReference": [
+            {
+                "resourceType": "DocumentReference",
+                "id": "clinical-1",
+                "type": {"text": "clinical_pdf"},
+                "date": "2026-08-01T10:00:00Z",
+                "content": [{"attachment": {"title": "note.pdf", "url": "Binary/one"}}],
+            },
+            {
+                "resourceType": "DocumentReference",
+                "id": "eligibility-1",
+                "type": {"text": "Stedi test-mode eligibility response"},
+                "date": "2026-08-01T11:00:00Z",
+                "content": [{"attachment": {"contentType": "application/json", "data": "e30="}}],
+            },
+            {
+                "resourceType": "DocumentReference",
+                "id": "reconstruction-1",
+                "type": {"text": "Clinician-approved pre-visit reconstruction"},
+                "date": "2026-08-01T12:00:00Z",
+                "content": [{"attachment": {"contentType": "application/json", "data": "e30="}}],
+            },
+        ],
+    }
+
+    docs = MedplumRepository(FakeClient()).list_documents("patient-1", resources)  # type: ignore[arg-type]
+
+    assert [doc["doc_id"] for doc in docs] == ["clinical-1"]
+
+
+def test_clinical_views_collapse_reconfirmed_active_facts() -> None:
+    resources = {
+        "MedicationStatement": [
+            {
+                "id": "med-seeded",
+                "status": "active",
+                "meta": {"lastUpdated": "2026-01-01T00:00:00Z"},
+                "medicationCodeableConcept": {"text": "Metformin"},
+                "dosage": [{"text": "1000 mg twice daily"}],
+            },
+            {
+                "id": "med-confirmed",
+                "status": "active",
+                "meta": {"lastUpdated": "2026-08-01T00:00:00Z"},
+                "medicationCodeableConcept": {"text": "metformin"},
+            },
+            {
+                "id": "med-error",
+                "status": "entered-in-error",
+                "meta": {"lastUpdated": "2026-08-02T00:00:00Z"},
+                "medicationCodeableConcept": {"text": "Metformin"},
+                "dosage": [{"text": "9999 mg hourly"}],
+            },
+            {
+                "id": "med-unverified",
+                "status": "active",
+                "meta": {
+                    "lastUpdated": "2026-08-03T00:00:00Z",
+                    "tag": [AI_UNVERIFIED_TAG],
+                },
+                "medicationCodeableConcept": {"text": "Metformin"},
+                "dosage": [{"text": "7777 mg hourly"}],
+            },
+            {
+                "id": "med-previous-1",
+                "status": "completed",
+                "effectivePeriod": {"start": "2024-01-01", "end": "2024-01-10"},
+                "medicationCodeableConcept": {"text": "Amoxicillin"},
+                "dosage": [{"text": "500 mg twice daily"}],
+            },
+            {
+                "id": "med-previous-2",
+                "status": "completed",
+                "effectivePeriod": {"start": "2025-02-01", "end": "2025-02-10"},
+                "medicationCodeableConcept": {"text": "Amoxicillin"},
+                "dosage": [{"text": "875 mg twice daily"}],
+            },
+        ],
+        "AllergyIntolerance": [
+            {
+                "id": "allergy-seeded",
+                "meta": {"lastUpdated": "2026-01-01T00:00:00Z"},
+                "verificationStatus": {"text": "confirmed"},
+                "code": {"text": "Penicillin"},
+                "reaction": [{"manifestation": [{"text": "Widespread itchy rash"}]}],
+            },
+            {
+                "id": "allergy-confirmed",
+                "meta": {"lastUpdated": "2026-08-01T00:00:00Z"},
+                "verificationStatus": {"text": "confirmed"},
+                "code": {"text": "penicillin"},
+                "reaction": [{"manifestation": [{"text": "Rash"}]}],
+            },
+            {
+                "id": "allergy-error",
+                "meta": {"lastUpdated": "2026-08-02T00:00:00Z"},
+                "verificationStatus": {"text": "entered-in-error"},
+                "code": {"text": "Penicillin"},
+                "reaction": [{"manifestation": [{"text": "Anaphylaxis"}]}],
+            },
+            {
+                "id": "allergy-unverified",
+                "meta": {
+                    "lastUpdated": "2026-08-03T00:00:00Z",
+                    "tag": [AI_UNVERIFIED_TAG],
+                },
+                "verificationStatus": {"text": "unconfirmed"},
+                "code": {"text": "Penicillin"},
+                "reaction": [{"manifestation": [{"text": "Airway closure"}]}],
+            },
+            {
+                "id": "allergy-old-confirmed",
+                "meta": {"lastUpdated": "2026-01-01T00:00:00Z"},
+                "verificationStatus": {"text": "confirmed"},
+                "code": {"text": "Sulfonamide"},
+                "reaction": [{"manifestation": [{"text": "Hives"}]}],
+            },
+            {
+                "id": "allergy-new-refuted",
+                "meta": {"lastUpdated": "2026-08-01T00:00:00Z"},
+                "verificationStatus": {"text": "refuted"},
+                "code": {"text": "Sulfonamide"},
+            },
+        ],
+        "Provenance": [],
+    }
+    repo = MedplumRepository(FakeClient())  # type: ignore[arg-type]
+
+    medications = repo.medication_views(resources)
+    allergies = repo.allergy_views(resources)
+    resources["MedicationStatement"].reverse()
+    resources["AllergyIntolerance"].reverse()
+
+    assert [(item["name"], item["dose"], item["frequency"], item["status"]) for item in medications] == [
+        ("Metformin", "1000 mg", "twice daily", "Active"),
+        ("Amoxicillin", "500 mg", "twice daily", "Previous"),
+        ("Amoxicillin", "875 mg", "twice daily", "Previous"),
+    ]
+    assert [(item["allergen"], item["reaction"]) for item in allergies] == [
+        ("Penicillin", "Rash")
+    ]
+    assert repo.medication_views(resources) == medications
+    assert repo.allergy_views(resources) == allergies
+
+
 def test_diagnostic_report_regeneration_reuses_its_binary() -> None:
     class ReportClient:
         def __init__(self) -> None:
@@ -511,12 +659,21 @@ def test_needs_correction_restores_unverified_report_tag() -> None:
     client = ReviewClient()
     repo = MedplumRepository(client)  # type: ignore[arg-type]
     accepted, _ = repo.review_diagnostic_report(
-        patient_id="patient-1", study_id="study-1", decision="accepted"
+        patient_id="patient-1",
+        study_id="study-1",
+        decision="accepted",
+        reviewer_id="operator-1",
+        reviewer_name="Dr. Reviewer",
     )
     assert AI_UNVERIFIED_TAG not in accepted["meta"]["tag"]
+    assert repo.report_reviewer(accepted)["reviewer_id"] == "operator-1"
 
     corrected, _ = repo.review_diagnostic_report(
-        patient_id="patient-1", study_id="study-1", decision="needs-correction"
+        patient_id="patient-1",
+        study_id="study-1",
+        decision="needs-correction",
+        reviewer_id="operator-1",
+        reviewer_name="Dr. Reviewer",
     )
     assert corrected["status"] == "preliminary"
     assert corrected["meta"]["tag"] == [AI_UNVERIFIED_TAG]

@@ -35,6 +35,7 @@ CONSULTATION_SYSTEM = f"{IDENTIFIER_BASE}/consultation"
 REPORT_REVIEW_TASK_SYSTEM = f"{DIAGNOSTIC_REPORT_SYSTEM}/review-task"
 REPORT_EXTENSION_BASE = "https://medtrace.local/fhir/StructureDefinition/imaging-report"
 AI_UNVERIFIED_TAG = {"system": TAG_SYSTEM, "code": "ai-extracted-unverified", "display": "AI extracted — unverified"}
+PATIENT_DOCUMENT_KINDS = frozenset({"clinical_pdf", "radiology_note", "conversation_note", "dicom"})
 
 
 def utc_now() -> str:
@@ -375,30 +376,57 @@ class MedplumRepository:
 
     def medication_views(self, resources: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
         sources = self._provenance_sources(resources)
-        out = []
+        grouped: dict[tuple[str, str], list[tuple[tuple[int, str], dict[str, Any]]]] = defaultdict(list)
+        previous: list[dict[str, Any]] = []
         for row in resources.get("MedicationStatement") or []:
+            raw_status = str(row.get("status") or "active").casefold()
+            if raw_status == "entered-in-error":
+                continue
             dosage = (row.get("dosage") or [{}])[0]
             text = str(dosage.get("text") or "") if isinstance(dosage, dict) else ""
             dose = next(iter(re.findall(r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|mL|units?)\b", text, re.I)), None)
             frequency = text.replace(dose, "").strip(" ,-;") if dose else text or None
             ref = f"MedicationStatement/{row.get('id')}"
-            status = str(row.get("status") or "active")
-            out.append({
+            item = {
                 "name": _coding_text(row.get("medicationCodeableConcept")) or "Unspecified medication",
                 "dose": dose,
                 "frequency": frequency,
-                "status": "Previous" if status in {"completed", "stopped", "entered-in-error"} else "Active",
+                "status": "Previous" if raw_status in {"completed", "stopped"} else "Active",
                 "start": _resource_date(row),
                 "end": (row.get("effectivePeriod") or {}).get("end") if isinstance(row.get("effectivePeriod"), dict) else None,
                 "verification_status": _verification(row),
                 "source_document_id": sources.get(ref),
-            })
-        return out
+            }
+            if item["status"] == "Previous":
+                previous.append(item)
+                continue
+            key = (item["name"].strip().casefold(), item["status"])
+            recency = str((row.get("meta") or {}).get("lastUpdated") or _resource_date(row) or "")
+            grouped[key].append(((item["verification_status"] == "verified", recency), item))
+
+        out: list[dict[str, Any]] = []
+        for candidates in grouped.values():
+            candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+            item = dict(candidates[0][1])
+            trust_rank = candidates[0][0][0]
+            rows = [candidate[1] for candidate in candidates if candidate[0][0] == trust_rank]
+            item["name"] = next((row["name"] for row in rows if not row["name"].islower()), item["name"])
+            for field in ("dose", "frequency", "source_document_id"):
+                item[field] = item.get(field) or next((row.get(field) for row in rows if row.get(field)), None)
+            starts = [str(row["start"]) for row in rows if row.get("start")]
+            if item["status"] == "Active" and starts:
+                item["start"] = min(starts)
+            out.append(item)
+        previous.sort(key=lambda item: (item["name"].casefold(), str(item.get("start") or ""), str(item.get("end") or "")))
+        return out + previous
 
     def allergy_views(self, resources: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
         sources = self._provenance_sources(resources)
-        out = []
+        grouped: dict[tuple[str, str], list[tuple[tuple[int, str], dict[str, Any], str]]] = defaultdict(list)
         for row in resources.get("AllergyIntolerance") or []:
+            verification = _coding_text(row.get("verificationStatus")).casefold()
+            if verification == "entered-in-error":
+                continue
             reaction = ""
             reactions = row.get("reaction") or []
             if reactions and isinstance(reactions[0], dict):
@@ -406,13 +434,37 @@ class MedplumRepository:
                 if manifestations:
                     reaction = _coding_text(manifestations[0])
             ref = f"AllergyIntolerance/{row.get('id')}"
-            out.append({
+            item = {
                 "allergen": _coding_text(row.get("code")) or "Unspecified allergen",
                 "reaction": reaction or None,
                 "source": f"Document {sources[ref]}" if sources.get(ref) else None,
                 "verification_status": _verification(row),
                 "source_document_id": sources.get(ref),
-            })
+            }
+            clinical_status = _coding_text(row.get("clinicalStatus")).casefold() or "active"
+            key = (item["allergen"].strip().casefold(), clinical_status)
+            verification_rank = int(item["verification_status"] == "verified")
+            recency = str((row.get("meta") or {}).get("lastUpdated") or _resource_date(row) or "")
+            grouped[key].append(((verification_rank, recency), item, verification))
+
+        out: list[dict[str, Any]] = []
+        for candidates in grouped.values():
+            candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+            if candidates[0][2] == "refuted":
+                continue
+            item = dict(candidates[0][1])
+            trust_rank = candidates[0][0][0]
+            rows = [
+                candidate[1]
+                for candidate in candidates
+                if candidate[0][0] == trust_rank and candidate[2] != "refuted"
+            ]
+            item["allergen"] = next(
+                (row["allergen"] for row in rows if not row["allergen"].islower()), item["allergen"]
+            )
+            for field in ("reaction", "source", "source_document_id"):
+                item[field] = item.get(field) or next((row.get(field) for row in rows if row.get(field)), None)
+            out.append(item)
         return out
 
     @staticmethod
@@ -636,7 +688,12 @@ class MedplumRepository:
 
     def list_documents(self, patient_id: str, resources: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
         data = resources or self.clinical_resources(patient_id)
-        docs = [self.document_view(doc, data.get("Task")) for doc in data.get("DocumentReference") or []]
+        docs = [
+            view
+            for doc in data.get("DocumentReference") or []
+            if (view := self.document_view(doc, data.get("Task")))["document_kind"]
+            in PATIENT_DOCUMENT_KINDS
+        ]
         docs.sort(key=lambda item: item["uploaded_at"], reverse=True)
         return docs
 
@@ -986,6 +1043,8 @@ class MedplumRepository:
         patient_id: str,
         study_id: str,
         decision: str,
+        reviewer_id: str,
+        reviewer_name: str,
         note: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         report = self.diagnostic_report_for_study(study_id)
@@ -1001,9 +1060,20 @@ class MedplumRepository:
             not in {
                 f"{REPORT_EXTENSION_BASE}/review-decision",
                 f"{REPORT_EXTENSION_BASE}/review-note",
+                f"{REPORT_EXTENSION_BASE}/reviewer-id",
+                f"{REPORT_EXTENSION_BASE}/reviewer-name",
+                f"{REPORT_EXTENSION_BASE}/reviewed-at",
             }
         ]
+        reviewed_at = utc_now()
         extensions.append(self._report_extension("review-decision", "valueCode", decision))
+        extensions.extend(
+            [
+                self._report_extension("reviewer-id", "valueString", reviewer_id),
+                self._report_extension("reviewer-name", "valueString", reviewer_name),
+                self._report_extension("reviewed-at", "valueDateTime", reviewed_at),
+            ]
+        )
         if note:
             extensions.append(self._report_extension("review-note", "valueString", note[:2000]))
         updated["extension"] = extensions
@@ -1034,8 +1104,15 @@ class MedplumRepository:
                 "businessStatus": {"text": decision},
                 "focus": {"reference": f"DiagnosticReport/{updated['id']}"},
                 "for": {"reference": f"Patient/{patient_id}"},
-                "authoredOn": utc_now(),
-                "lastModified": utc_now(),
+                "owner": {
+                    "identifier": {
+                        "system": f"{IDENTIFIER_BASE}/imaging-reviewer",
+                        "value": reviewer_id,
+                    },
+                    "display": reviewer_name,
+                },
+                "authoredOn": reviewed_at,
+                "lastModified": reviewed_at,
                 **({"description": note[:1000]} if note else {}),
             },
             identifier=f"{REPORT_REVIEW_TASK_SYSTEM}|{study_id}",
@@ -1046,6 +1123,13 @@ class MedplumRepository:
         decision = str(self._extension_value(report, "review-decision") or "unreviewed")
         note = self._extension_value(report, "review-note")
         return decision, str(note) if note else None
+
+    def report_reviewer(self, report: dict[str, Any]) -> dict[str, str | None]:
+        return {
+            "reviewer_id": str(self._extension_value(report, "reviewer-id") or "") or None,
+            "reviewer_name": str(self._extension_value(report, "reviewer-name") or "") or None,
+            "reviewed_at": str(self._extension_value(report, "reviewed-at") or "") or None,
+        }
 
     # ---- consultations ---------------------------------------------------
 

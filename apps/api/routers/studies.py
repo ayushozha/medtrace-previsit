@@ -15,6 +15,7 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from apps.api.dependencies import RequireMedplumDep
+from apps.api.demo_security import DemoOperatorDep
 from apps.api.routers.medplum_common import (
     is_synthetic_patient,
     raise_medplum_http,
@@ -73,6 +74,14 @@ def _synthetic_study_or_404(study_id: str) -> dict:
     return study
 
 
+def _trusted_report_review(repo, report: dict) -> tuple[str, str | None]:
+    decision, note = repo.report_review(report)
+    if decision == "unreviewed":
+        return decision, note
+    reviewer = repo.report_reviewer(report)
+    return (decision, note) if reviewer.get("reviewer_id") and reviewer.get("reviewer_name") else ("unreviewed", None)
+
+
 def _study_out(study: dict) -> StudyOut:
     repo = repository()
     study_id = identifier_value(study, IMAGING_STUDY_SYSTEM) or str(study.get("id") or "")
@@ -86,7 +95,7 @@ def _study_out(study: dict) -> StudyOut:
     document = repo.imaging_document(study_id)
     report_resource = repo.diagnostic_report_for_study(study_id)
     review_decision, review_note = (
-        repo.report_review(report_resource) if report_resource else ("unreviewed", None)
+        _trusted_report_review(repo, report_resource) if report_resource else ("unreviewed", None)
     )
     report = repo.diagnostic_report_view(report_resource) if report_resource else None
     return StudyOut(
@@ -278,7 +287,11 @@ def report_with_medgemma(study_id: str, request: ReportRequest) -> ReportOut:
     response_model=ReportReviewOut,
     dependencies=[RequireMedplumDep],
 )
-def review_report(study_id: str, request: ReportReviewIn) -> ReportReviewOut:
+def review_report(
+    study_id: str,
+    request: ReportReviewIn,
+    operator: DemoOperatorDep,
+) -> ReportReviewOut:
     try:
         study = _synthetic_study_or_404(study_id)
         report, task = repository().review_diagnostic_report(
@@ -286,6 +299,8 @@ def review_report(study_id: str, request: ReportReviewIn) -> ReportReviewOut:
             study_id=study_id,
             decision=request.decision,
             note=request.note,
+            reviewer_id=operator.operator_id,
+            reviewer_name=operator.display_name,
         )
         return ReportReviewOut(
             decision=request.decision,

@@ -97,7 +97,7 @@ async def create_previsit_draft(
     *,
     utterances: list[dict[str, Any]],
     retrieval: list[dict[str, Any]],
-) -> tuple[PrevisitDraft, str]:
+) -> tuple[PrevisitDraft, str, str]:
     """Use OpenAI Responses structured outputs; no clinical write occurs here."""
     kwargs: dict[str, Any] = {"api_key": _required("OPENAI_API_KEY")}
     base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
@@ -132,9 +132,10 @@ async def create_previsit_draft(
         "or claim that any write has occurred. "
         "Use an empty list or empty string when evidence is absent."
     )
+    model = _required("OPENAI_MODEL")
     try:
         response = await client.responses.parse(
-            model=_required("OPENAI_MODEL"),
+            model=model,
             store=False,
             input=[
                 {"role": "system", "content": instructions},
@@ -150,4 +151,4 @@ async def create_previsit_draft(
     draft = response.output_parsed
     if draft is None:
         raise SponsorIntegrationError("openai", "OpenAI returned no structured pre-visit draft.")
-    return validate_evidence(draft, utterances), str(response.id)
+    return validate_evidence(draft, utterances), str(response.id), model

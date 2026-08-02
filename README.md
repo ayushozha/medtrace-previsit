@@ -40,7 +40,7 @@ One FastAPI service and one React app, sharing the `src/medtrace_agent/` Python 
 | Stedi constrained test-mode eligibility | Source-complete; exact supported synthetic test case required |
 | Guaranteed final visit price | Not supported by 270/271 eligibility; intentionally not claimed |
 | AI-led realtime conversational interview | Not implemented; current demo is a recorded/uploaded two-speaker check-in |
-| 3D body/biometric visualization | Not implemented; existing longitudinal charts are 2D |
+| 3D diagnostic imaging reconstruction | Implemented for geometric DICOM volumes; longitudinal biometrics remain 2D |
 
 ---
 
@@ -117,7 +117,8 @@ Open [`http://localhost:3000/yc-medplum-hackathon-demo`](http://localhost:3000/y
 
 ```mermaid
 flowchart LR
-  CHART["Existing patient chart"] --> AUDIO["Synthetic pre-visit audio"]
+  CHART["Existing patient chart"] --> IMAGE["Accepted 3D imaging context"]
+  IMAGE --> AUDIO["Synthetic pre-visit audio"]
   AUDIO --> DG["Deepgram transcript and diarization"]
   DG --> MOSS["Moss local retrieval"]
   MOSS --> OAI["OpenAI structured draft"]
@@ -128,14 +129,16 @@ flowchart LR
   STEDI --> READY["Saved clinician reconstruction"]
 ```
 
-The intended storyboard targets **2:45** and must stop before **3:00**. This is a source-level target, not yet a timed live-provider recording; rehearse and time the final credentialed run before submission.
+Record the submission as a **six-cut, 29-second story**. Provider calls remain real, but cut their variable network waits; use **Open latest saved reconstruction** to replay a previously completed Medplum-backed run with its original provider IDs.
 
-1. Open the existing synthetic patient chart and show diabetes, worsening HbA1c, medication history, penicillin rash, longitudinal biometrics, and the timeline.
-2. Paste the runtime-only operator token, choose which Deepgram speaker is the patient, and record or upload a 30–40 second two-speaker synthetic check-in.
-3. Show real Deepgram speaker/timestamp evidence, the non-persisted Moss session result, and the OpenAI proposal. Correct the reviewed clinical fields if needed, then approve.
-4. Show Medplum validation success and the actual FHIR resource IDs. No clinical FHIR write occurs before approval.
-5. Run Stedi's official constrained Aetna/Jane Doe test case and show qualifier-aware synthetic benefits. Do not present it as a payer response or a final price.
-6. Close on the saved readiness view and ask: “What changed today, what should the clinician verify, and what evidence supports it?”
+1. **0–4s — longitudinal risk:** show diabetes, HbA1c 7.2% → 8.1%, metformin, penicillin rash, and the existing timeline.
+2. **4–7s — imaging:** open the existing MPR/3D DICOM workspace and show a clinician-accepted DiagnosticReport. Only accepted reports enter Moss/OpenAI context.
+3. **7–12s — voice evidence:** show real Deepgram speakers/timestamps, Moss retrieval, and the OpenAI structured proposal for shift-work metformin misses, the confirmed rash, and the unresolved follow-up.
+4. **12–18s — human gate:** show the clinician correction/approval surface, then Medplum validation success and actual resource IDs. No clinical FHIR write occurs before approval.
+5. **18–24s — coverage:** show Stedi's constrained test-mode coverage and qualifier-aware cost-sharing. Do not present it as an exact final visit price.
+6. **24–29s — readiness:** return to today's encounter and close on: “What changed today, what should the clinician verify, and what evidence supports it?”
+
+For the live capture path, use a short prerecorded synthetic clip with two genuine speakers. It still traverses Deepgram → Moss → OpenAI; the saved-reconstruction path is a replay of canonical Medplum data, not a mock response.
 
 The route has no application-generated sponsor fallback. Missing credentials fail visibly. Stedi itself returns Stedi-generated synthetic test data and does not contact a payer. Use synthetic data only: Moss currently lists HIPAA support on Enterprise.
 
@@ -161,21 +164,22 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Set the first as `YC_DEMO_CHECKIN_SIGNING_KEY`, the second as `YC_DEMO_ACCESS_TOKEN`, and set server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME`. The browser asks for the access token at runtime, retains it only in dialog memory, and cannot choose approval provenance.
+Set the first as `YC_DEMO_CHECKIN_SIGNING_KEY`, the second as `YC_DEMO_ACCESS_TOKEN`, and set server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME`. The browser asks for the access token at review time, retains it only in the mounted review surface's memory, and cannot choose approval provenance.
 
 ### Demo API surface
 
-All patient-scoped operations require `X-MedTrace-Demo-Token`; `/api/demo/status` is public but exposes only configuration presence and the synthetic chart ID.
+All patient-scoped operations require `X-MedTrace-Demo-Token`; `/api/demo/status` is public but exposes only configuration presence and the synthetic chart ID. Imaging report review uses the same operator gate and persists the server-asserted reviewer identity; only reports carrying that authenticated acceptance provenance enter Moss/OpenAI context.
 
 | Method | Path | Purpose | Important failure behavior |
 |---|---|---|---|
 | `GET` | `/api/demo/status` | Provider/workflow configuration plus safe demo-patient selection | Returns a Patient ID only after the exact synthetic persona passes its Medplum safety check |
-| `POST` | `/api/demo/patients/{id}/checkins` | Bounded audio → Deepgram → per-check-in Moss session → OpenAI reviewed draft | Rejects non-synthetic Patients, invalid speaker selections or selections with no diarized utterances, recordings over 60 seconds, and missing providers |
+| `POST` | `/api/studies/{id}/reports/review` | Record an authenticated clinician imaging decision and reviewer provenance | Requires the runtime operator token; unauthenticated AI drafts never enter retrieval |
+| `POST` | `/api/demo/patients/{id}/checkins` | Bounded audio → Deepgram → accepted imaging/chart context in a per-check-in Moss session → OpenAI reviewed draft | Rejects non-synthetic Patients, invalid speaker selections or selections with no diarized utterances, recordings over 60 seconds, and missing providers |
 | `POST` | `/api/demo/patients/{id}/checkins/confirm` | Verify signed source evidence, validate FHIR, atomically commit the journal and clinical resources, queue the Zep projection | `approved=false` never builds/writes FHIR; retries reuse the check-in ID |
 | `POST` | `/api/demo/patients/{id}/eligibility` | Run the exact Stedi test tuple and persist normalized benefit fields to Medplum | Requires a completed validated check-in; never stores the raw Stedi payload |
-| `GET` | `/api/demo/patients/{id}/readiness` | Reconstruct the completed clinician view | Rejects partial workflow journals |
+| `GET` | `/api/demo/patients/{id}/readiness` | Reconstruct provider IDs, transcript, accepted imaging provenance, clinician review, FHIR validation/IDs, and eligibility | Rejects partial workflow journals |
 
-Audio is sent to Deepgram but is not persisted by this repository. OpenAI Responses is called with `store=False`. The full diarized transcript is displayed for review; only cited patient-speaker utterances, reviewed changes, provider IDs, validation results, and normalized Stedi fields are retained canonically in Medplum. A durable Medplum `Task` projects the approved note into Zep without blocking canonical readiness. Moss receives credentials/session creation through its control plane, uses a unique per-check-in local session, has telemetry disabled with `MOSS_DISABLE_TELEMETRY=1`, and is never pushed with `push_index()`.
+Audio is sent to Deepgram but is not persisted by this repository. OpenAI Responses is called with `store=False`. After approval, the bounded diarized transcript, cited patient evidence, accepted DiagnosticReport provenance, reviewed changes, provider IDs, validation results, and normalized Stedi fields are retained canonically in Medplum for reconstruction. A durable Medplum `Task` projects the approved note into Zep without blocking canonical readiness. Moss receives credentials/session creation through its control plane, uses a unique per-check-in local session, has telemetry disabled with `MOSS_DISABLE_TELEMETRY=1`, and is never pushed with `push_index()`.
 
 ### Cost language
 
