@@ -6,6 +6,8 @@
  * starts it on 8010 — the old frontend hard-coded 8000, which is the main API.
  */
 
+import { apiGet } from '@/lib/api';
+
 const RAW_BASE = import.meta.env.VITE_TRANSCRIPTION_API_URL ?? 'http://localhost:8010';
 export const TRANSCRIPTION_API_BASE = RAW_BASE.replace(/\/$/, '');
 
@@ -31,10 +33,10 @@ async function detailOf(res: Response, fallback: string): Promise<string> {
 }
 
 export async function listSessions(patientId: string, signal?: AbortSignal): Promise<SessionRecord[]> {
-  const query = new URLSearchParams({ patient_id: patientId });
-  const res = await fetch(`${TRANSCRIPTION_API_BASE}/api/sessions?${query}`, { signal });
-  if (!res.ok) throw new Error(await detailOf(res, `Failed to load sessions (${res.status})`));
-  const data = await res.json();
+  const data = await apiGet<SessionRecord[]>(
+    `/api/patients/${encodeURIComponent(patientId)}/consultations`,
+    signal,
+  );
   return Array.isArray(data) ? (data as SessionRecord[]) : [];
 }
 

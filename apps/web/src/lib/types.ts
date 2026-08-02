@@ -265,7 +265,7 @@ export interface Study extends StudyUpload {
 
 /** The `imaging` block of `GET /api/health`. */
 export interface ImagingStatus {
-  provider: 'mock' | 'fireworks-vl';
+  provider: 'mock' | 'fireworks-vl' | 'http' | 'local';
   fireworks_configured: boolean;
   model: string | null;
 }

@@ -20,8 +20,9 @@ decision support ("cognitive aid"), and vision-ingest output is demo-grade.
   - *Imaging*: patient-linked DICOM upload, MedSAM2 segmentation, and draft reports
     (Fireworks VL). Medplum owns `ImagingStudy`, representative patient-scoped
     DICOM `Binary`/`DocumentReference`, `DiagnosticReport`, and review `Task`
-    resources; the complete series stays in the local demo viewer store. Model
-    inference runs in mock mode without `FIREWORKS_API_KEY`.
+    resources; the complete series stays in the local demo viewer store. Public
+    inference requires a real Fireworks, HTTP, or local model provider;
+    deterministic adapter fixtures are limited to unit tests.
 - **`apps/web/`** (Vite 6 + React 19 + Tailwind v4, port 3000) — one app with
   `/` (landing), `/patients` + `/patients/:id` (chart), patient-scoped
   `/patients/:id/imaging` and `/patients/:id/session` (voice, lazy-loaded),
@@ -86,7 +87,7 @@ Prefer the root `package.json` scripts over re-deriving commands.
 | `npm run dev:web` | Vite only | 3000 |
 | `npm run dev:transcription` | transcription backend + CopilotKit runtime | 8010, 4000 |
 | `npm run medplum:up` | Medplum server + admin app; internal Postgres/Redis | 8103, 3002 |
-| `npm run medplum:export-sqlite` | Portable SQLite dump of patient charts for sharing | writes `data/exports/patients.sqlite` |
+| `npm run medplum:export-sqlite` | Portable synthetic-only SQLite dump for sharing | writes `exports/patients.sqlite` |
 
 Running the backend manually:
 
@@ -97,14 +98,14 @@ Running the backend manually:
 ## Tests, lint, type checks
 
 - Python: `.venv/bin/pytest -m "not integration"` (or `npm run test:py`) —
-  currently 61 passed, 2 deselected. The `integration` marker hits the live NCBI
+  run the current offline suite. The `integration` marker hits the live NCBI
   PubMed API and needs network. `pyproject.toml` sets `pythonpath = ["src"]` and
   `testpaths = ["tests"]` (this keeps collection out of `services/`, where
   `test_transcribe.py` is a manual asyncio script, not a pytest module).
   Single file: `.venv/bin/pytest tests/unit/test_rag_chat.py`.
-- **Coverage gap to know about**: tests exercise `src/medtrace_agent/` only.
-  `apps/api/` has none — verify API changes by running the service and calling
-  it (e.g. `curl http://127.0.0.1:8001/api/health`).
+- **Coverage gap to know about**: repository, provider, and selected API-boundary
+  helpers have regression tests; browser navigation still relies on strict
+  typecheck/build plus runtime verification.
 - Web: `npm run lint` (`tsc --noEmit`, strict mode) and `npm run build`
   (`vite build`), both scoped to `apps/web`.
 - No Python linter/formatter is configured; no CI pipeline exists in the repo.
@@ -145,14 +146,15 @@ resources.
 failures are logged, not raised; canonical FHIR clinical endpoints, imaging, and
 health still work without Zep. `scripts/apply_ontology.py` re-applies it manually.
 
-**LLM layer:** every call goes through `fireworks_chat_client()` against an
+**LLM layer:** clinical package calls use `fireworks_chat_client()` against an
 **OpenAI-compatible** endpoint — Fireworks AI by default (`FIREWORKS_BASE_URL`,
 `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`). `FIREWORKS_VLM_API` picks the vision
 transport: `chat` (`/v1/chat/completions`, default) vs `completions`
 (`<image>`-prompt style). `FIREWORKS_REASONING_EFFORT=none` keeps Qwen3-style
 CoT out of `reasoning_content` so JSON/text lands in `content`. Any
 OpenAI-compatible endpoint works if you repoint the env vars (base URL,
-model id, and key) — including a self-hosted vLLM server.
+model id, and key) — including a self-hosted vLLM server. The separate
+transcription/chart-agent service reads `OPENAI_*` directly.
 
 ### API (`apps/api/`)
 
@@ -171,9 +173,10 @@ parent/child `Communication` resources and conditional request identifiers.
 
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter**
-(`MEDSAM2_ADAPTER_MODULE` / `MEDGEMMA_MODEL_ID`) → **deterministic mock**.
+(`MEDSAM2_ADAPTER_MODULE` / `MEDGEMMA_MODEL_ID`). Deterministic adapter fixtures
+exist for unit tests, but public routes reject mock inference with HTTP 503.
 Draft reports prefer Fireworks VL (`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`)
-before the MedGemma HTTP/local paths; mock without a Fireworks key. DICOM previews:
+before the MedGemma HTTP/local paths. DICOM previews:
 pydicom with `RescaleSlope`/`RescaleIntercept` and windowing
 (`WindowCenter`/`WindowWidth`); ROI prompts are normalized 0–1 and converted to
 pixels server-side.
@@ -190,12 +193,14 @@ The session route is lazy-loaded because CopilotKit + tiptap add ~2 MB.
 `session.css` is shared by the session workspace and the demo check-in dialog;
 the remaining routes are pure Tailwind.
 
-**Vite proxies everything the browser needs**: `/api` and `/data` to the API
+**Vite proxies the main app**: `/api` and `/data` to the API
 (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8001`) and
 `/api/copilotkit` to the CopilotKit runtime (default `http://localhost:4000`).
 The `/api/copilotkit` entry must stay first — Vite matches proxy entries in
 insertion order. `src/lib/api.ts` retries GETs on connection failure, because
 Vite is serving in ~200 ms while the API needs a second or two to listen.
+The session REST client defaults to port 8010 unless `VITE_TRANSCRIPTION_API_URL`
+is configured to a same-origin proxy.
 
 ## Conventions
 
@@ -251,11 +256,10 @@ Vite is serving in ~200 ms while the API needs a second or two to listen.
 - **CORS** is configured via `API_CORS_ORIGINS` (defaults to localhost:3000
   variants) — don't widen it to `*` for the main API.
 - **Synthetic-only deployment boundary**: the generic clinical routes have no
-  caller authentication; the Medplum dependency checks server configuration,
-  not end-user identity. Never connect this demo to a PHI-bearing Medplum
-  project. Use a least-privilege ClientApplication scoped to an isolated
-  synthetic-only project. The YC operator token protects its workflow routes
-  but is not app-wide authentication or RBAC.
+  caller authentication; they reject patients without the MedTrace `synthetic`
+  tag, but this is not identity or RBAC. Never connect this demo to a PHI-bearing
+  Medplum project. Use a least-privilege ClientApplication scoped to an isolated
+  synthetic-only project. The YC operator token protects its workflow routes.
 - **Demo-grade output**: vision ingest can misread numbers or hallucinate
   structured fields; agent output is non-diagnostic clinical decision support,
   not a medical device. Preserve those disclaimers in code and UI.

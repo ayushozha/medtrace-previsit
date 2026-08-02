@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -109,10 +110,17 @@ def main() -> None:
     parser.add_argument(
         "--include-dicom",
         action="store_true",
-        help="Register existing synthetic DICOM studies in Medplum and upload one representative Binary per study",
+        help="Register explicitly mapped synthetic DICOM studies in Medplum",
     )
-    parser.add_argument("--dicom-root", type=Path, default=Path("data/studies"))
+    parser.add_argument("--dicom-root", type=Path)
+    parser.add_argument(
+        "--dicom-manifest",
+        type=Path,
+        help='JSON object mapping each study directory name to its synthetic chart id',
+    )
     args = parser.parse_args()
+    if args.include_dicom and (args.dicom_root is None or args.dicom_manifest is None):
+        parser.error("--include-dicom requires --dicom-root and --dicom-manifest")
     store = load_synthetic_store(args.store)
     charts = store.get("chart_subjects") or []
     documents = store.get("documents") or []
@@ -200,10 +208,24 @@ def main() -> None:
     dicom_count = 0
     dicom_instance_count = 0
     if args.include_dicom and patient_ids:
-        canonical_patients = [patient_ids[str(row.get("id") or "")] for row in charts if str(row.get("id") or "") in patient_ids]
-        for index, directory in enumerate(
-            path for path in sorted(args.dicom_root.glob("ST-*")) if path.is_dir()
+        try:
+            manifest = json.loads(args.dicom_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Could not read DICOM manifest: {exc}") from exc
+        if not isinstance(manifest, dict) or not all(
+            isinstance(study_id, str) and isinstance(chart_id, str)
+            for study_id, chart_id in manifest.items()
         ):
+            raise SystemExit("DICOM manifest must be a JSON object of study ids to chart ids.")
+        directories = [path for path in sorted(args.dicom_root.glob("ST-*")) if path.is_dir()]
+        unmapped = [directory.name for directory in directories if directory.name not in manifest]
+        unknown_charts = sorted({chart_id for chart_id in manifest.values() if chart_id not in patient_ids})
+        if unmapped or unknown_charts:
+            raise SystemExit(
+                "DICOM manifest is incomplete or references unknown synthetic charts: "
+                f"unmapped studies={unmapped}, unknown charts={unknown_charts}."
+            )
+        for directory in directories:
             paths = [
                 path
                 for path in sorted(directory.iterdir())
@@ -212,7 +234,7 @@ def main() -> None:
             if not paths:
                 continue
             repo.upsert_imaging_study(
-                patient_id=canonical_patients[index % len(canonical_patients)],
+                patient_id=patient_ids[manifest[directory.name]],
                 study_id=directory.name,
                 paths=paths,
                 synthetic=True,

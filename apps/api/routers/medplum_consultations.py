@@ -8,13 +8,30 @@ import binascii
 from fastapi import APIRouter, HTTPException, status
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import raise_medplum_http
-from apps.api.schemas import ConsultationIn, ConsultationOut
+from apps.api.routers.medplum_common import raise_medplum_http, require_synthetic_patient
+from apps.api.schemas import ConsultationIn, ConsultationOut, ConsultationSessionOut
 from medtrace_agent.medplum import MedplumError
 from medtrace_agent.medplum_repository import repository
 
 
 router = APIRouter(prefix="/api/patients", tags=["consultations"])
+
+
+@router.get(
+    "/{patient_id}/consultations",
+    response_model=list[ConsultationSessionOut],
+    dependencies=[RequireMedplumDep],
+)
+def list_consultations(patient_id: str) -> list[ConsultationSessionOut]:
+    repo = repository()
+    try:
+        require_synthetic_patient(repo.get_patient(patient_id))
+        return [
+            ConsultationSessionOut.model_validate(item)
+            for item in repo.consultation_views(patient_id)
+        ]
+    except MedplumError as exc:
+        raise_medplum_http(exc)
 
 
 @router.post(
@@ -23,6 +40,11 @@ router = APIRouter(prefix="/api/patients", tags=["consultations"])
     dependencies=[RequireMedplumDep],
 )
 def upsert_consultation(patient_id: str, body: ConsultationIn) -> ConsultationOut:
+    repo = repository()
+    try:
+        require_synthetic_patient(repo.get_patient(patient_id))
+    except MedplumError as exc:
+        raise_medplum_http(exc)
     audio: bytes | None = None
     content_type = body.audio_content_type
     if body.audio_base64:
@@ -41,7 +63,7 @@ def upsert_consultation(patient_id: str, body: ConsultationIn) -> ConsultationOu
             ) from exc
 
     try:
-        result = repository().upsert_consultation(
+        result = repo.upsert_consultation(
             patient_id=patient_id,
             consultation_id=body.consultation_id,
             transcript=body.transcript,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import tempfile
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from time import time_ns
@@ -198,18 +199,37 @@ class MedSAM2Service:
         study volume, transposing if the server answered in ``[W, H, D]`` order.
         """
         if content[:2] == b"PK":
-            data = np.load(BytesIO(content), allow_pickle=True)
-            key = "mask" if "mask" in data.files else data.files[0]
-            mask = (np.asarray(data[key]) > 0).astype("uint8")
-            if mask.shape == tuple(reversed(expected_shape)):
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                members = archive.infolist()
+                if len(members) != 1 or members[0].filename != "mask.npy":
+                    raise ValueError("MedSAM2 NPZ response must contain only a mask array.")
+                max_array_bytes = int(np.prod(expected_shape)) * 8 + 4096
+                if members[0].file_size > max_array_bytes:
+                    raise ValueError("MedSAM2 mask payload is larger than the expected volume.")
+
+            with np.load(BytesIO(content), allow_pickle=False) as data:
+                mask = np.asarray(data["mask"])
+            if not (
+                np.issubdtype(mask.dtype, np.bool_)
+                or np.issubdtype(mask.dtype, np.integer)
+                or np.issubdtype(mask.dtype, np.floating)
+            ):
+                raise ValueError(f"MedSAM2 mask dtype {mask.dtype} is not numeric or boolean.")
+            if np.issubdtype(mask.dtype, np.floating) and not np.isfinite(mask).all():
+                raise ValueError("MedSAM2 mask contains non-finite values.")
+            if mask.shape == expected_shape:
+                pass
+            elif mask.shape == tuple(reversed(expected_shape)):
                 mask = mask.transpose(2, 1, 0)
             if mask.shape != expected_shape:
                 raise ValueError(
                     f"MedSAM2 mask grid {mask.shape} does not match the study volume "
                     f"{expected_shape}"
                 )
-            return np.ascontiguousarray(mask)
+            return np.ascontiguousarray(mask > 0, dtype="uint8")
 
+        if content[:2] != b"\x1f\x8b":
+            raise ValueError("MedSAM2 returned neither an NPZ mask nor a gzipped NIfTI mask.")
         mask_path = work_dir / "mask.nii.gz"
         mask_path.write_bytes(content)
         return load_nifti_mask(mask_path, expected_shape=expected_shape)

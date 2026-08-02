@@ -22,6 +22,8 @@ const proxy = {
 };
 
 export default defineConfig({
+  // The monorepo keeps one canonical environment file at the repository root.
+  envDir: path.resolve(__dirname, '../..'),
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

@@ -51,7 +51,7 @@ services:
       binary-storage-init:
         condition: service_completed_successfully
     ports:
-      - "8103:8103"
+      - "127.0.0.1:8103:8103"
     command: ["env"]
     environment:
       MEDPLUM_PORT: 8103
@@ -69,7 +69,8 @@ services:
       MEDPLUM_BINARY_STORAGE: file:/var/lib/medplum/binary
       MEDPLUM_SUPPORT_EMAIL: '"Medplum" <support@medplum.local>'
       MEDPLUM_ALLOWED_ORIGINS: http://localhost:3002,http://127.0.0.1:3002
-      MEDPLUM_MAX_JSON_SIZE: 1mb
+      # Consultation transactions can contain the bounded 35 MB base64 audio payload.
+      MEDPLUM_MAX_JSON_SIZE: 40mb
       MEDPLUM_MAX_BATCH_SIZE: 50mb
       MEDPLUM_VM_CONTEXT_BOTS_ENABLED: "true"
       MEDPLUM_DEFAULT_BOT_RUNTIME_VERSION: vmcontext
@@ -94,7 +95,7 @@ services:
       medplum-server:
         condition: service_healthy
     ports:
-      - "3002:3000"
+      - "127.0.0.1:3002:3000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 10s

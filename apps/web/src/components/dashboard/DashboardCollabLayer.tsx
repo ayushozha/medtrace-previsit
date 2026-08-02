@@ -303,12 +303,21 @@ export function DashboardCollabLayer({
       assistantText: fromMessages.assistantText,
     });
     if (syncedChecklist.length) {
-      setChecklist(
-        syncedChecklist.map((item) => ({
-          ...item,
-          agentNote: fromMessages.notes[item.id] ?? item.agentNote,
-        })),
-      );
+      const mergedChecklist = syncedChecklist.map((item) => ({
+        ...item,
+        agentNote: fromMessages.notes[item.id] ?? item.agentNote,
+      }));
+      setChecklist(mergedChecklist);
+      for (const item of mergedChecklist) {
+        if (!item.agentNote) continue;
+        void apiPatch(`/api/patients/${snapshot.patient.id}/checklist/${item.id}`, {
+          text: item.text,
+          done: item.done,
+          agent_note: item.agentNote,
+        }).catch((error: unknown) =>
+          setErrorMsg(error instanceof Error ? error.message : 'Could not save checklist note.'),
+        );
+      }
     } else if (Object.keys(fromMessages.notes).length) {
       setChecklist((prev) =>
         prev.map((item) => ({
@@ -319,7 +328,7 @@ export function DashboardCollabLayer({
     }
     if (syncedInsights.length) setInsights(syncedInsights);
     if (syncedFocus) setFocus(syncedFocus);
-  }, [agent]);
+  }, [agent, snapshot.patient.id]);
 
   // When an agent run finishes, pull shared state into local UI (chart widgets).
   useEffect(() => {

@@ -25,6 +25,7 @@ from langgraph.types import Command
 
 from clinical_memory_agent import _ask_api, _last_user_text
 from dashboard_agent import _format_checklist, update_dashboard_ui
+from model_config import openai_model
 
 RouteName = Literal["collab", "memory"]
 
@@ -56,7 +57,7 @@ def _heuristic_route(user_text: str) -> RouteName:
 
 async def _llm_route(user_text: str, config: Optional[RunnableConfig]) -> RouteName:
     model = ChatOpenAI(
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        model=openai_model(),
         base_url=os.environ.get("OPENAI_BASE_URL") or None,
         api_key=os.environ.get("OPENAI_API_KEY") or None,
         temperature=0,
@@ -141,7 +142,7 @@ Current focus JSON:
 """
 
     model = ChatOpenAI(
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        model=openai_model(),
         base_url=os.environ.get("OPENAI_BASE_URL") or None,
         api_key=os.environ.get("OPENAI_API_KEY") or None,
     )
@@ -257,7 +258,7 @@ async def memory_node(state: ChartRouterState, config: Optional[RunnableConfig] 
     except Exception as exc:  # noqa: BLE001
         if patient_context.strip():
             model = ChatOpenAI(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                model=openai_model(),
                 base_url=os.environ.get("OPENAI_BASE_URL") or None,
                 api_key=os.environ.get("OPENAI_API_KEY") or None,
             )

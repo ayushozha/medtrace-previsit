@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import raise_medplum_http
+from apps.api.routers.medplum_common import raise_medplum_http, require_synthetic_patient
 from apps.api.schemas import (
     AbnormalFindingOut,
     AlertOut,
@@ -26,8 +26,7 @@ router = APIRouter(prefix="/api/patients", tags=["clinical"])
 def _resources(patient_id: str) -> dict:
     repo = repository()
     try:
-        if not repo.get_patient(patient_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
+        require_synthetic_patient(repo.get_patient(patient_id))
         return repo.clinical_resources(patient_id)
     except MedplumError as exc:
         raise_medplum_http(exc)

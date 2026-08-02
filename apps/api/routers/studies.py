@@ -8,14 +8,18 @@ used by the browser viewer.
 from __future__ import annotations
 
 from pathlib import Path
-from shutil import copyfileobj, rmtree
+from shutil import rmtree
 from time import time_ns
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import raise_medplum_http
+from apps.api.routers.medplum_common import (
+    is_synthetic_patient,
+    raise_medplum_http,
+    require_synthetic_patient,
+)
 from apps.api.schemas import (
     ReportOut,
     ReportRequest,
@@ -38,6 +42,8 @@ from medtrace_agent.medplum import MedplumError
 from medtrace_agent.medplum_repository import IMAGING_STUDY_SYSTEM, identifier_value, repository
 
 router = APIRouter(prefix="/api/studies", tags=["imaging"])
+_MAX_DICOM_FILES = 2_000
+_MAX_DICOM_BYTES = 512 * 1024 * 1024
 
 medsam2_service = MedSAM2Service()
 medgemma_service = MedGemmaService()
@@ -53,6 +59,18 @@ def _local_dicoms(study_id: str) -> list[Path]:
     if not directory.is_dir():
         return []
     return [path for path in directory.iterdir() if path.is_file() and is_dicom_file(path)]
+
+
+def _synthetic_study_or_404(study_id: str) -> dict:
+    repo = repository()
+    study = repo.client.search_one(
+        "ImagingStudy",
+        {"identifier": f"{IMAGING_STUDY_SYSTEM}|{study_id}"},
+    )
+    if not study:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Imaging study not found.")
+    require_synthetic_patient(repo.get_patient(_patient_id(study)))
+    return study
 
 
 def _study_out(study: dict) -> StudyOut:
@@ -97,7 +115,14 @@ def _study_out(study: dict) -> StudyOut:
 @router.get("", response_model=list[StudyOut], dependencies=[RequireMedplumDep])
 def list_studies(patient_id: str | None = None) -> list[StudyOut]:
     try:
-        return [_study_out(study) for study in repository().list_imaging_studies(patient_id)]
+        repo = repository()
+        if patient_id:
+            require_synthetic_patient(repo.get_patient(patient_id))
+        return [
+            _study_out(study)
+            for study in repo.list_imaging_studies(patient_id)
+            if is_synthetic_patient(repo.get_patient(_patient_id(study)))
+        ]
     except MedplumError as exc:
         raise_medplum_http(exc)
 
@@ -115,11 +140,12 @@ async def create_study(
     """Store one DICOM series and register its canonical Patient relationship."""
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files were uploaded.")
+    if len(files) > _MAX_DICOM_FILES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Too many DICOM files.")
 
     repo = repository()
     try:
-        if not repo.get_patient(patient_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
+        require_synthetic_patient(repo.get_patient(patient_id))
     except MedplumError as exc:
         raise_medplum_http(exc)
 
@@ -128,13 +154,22 @@ async def create_study(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     stored: list[Path] = []
+    total_bytes = 0
     for index, upload in enumerate(files):
         leaf = Path(upload.filename or f"slice-{index:05d}.dcm").name
         path = target_dir / leaf
         if path.exists():
             path = target_dir / f"{index:05d}-{leaf}"
         with path.open("wb") as output:
-            copyfileobj(upload.file, output)
+            while chunk := upload.file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > _MAX_DICOM_BYTES:
+                    rmtree(target_dir, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="DICOM upload exceeds 512 MiB.",
+                    )
+                output.write(chunk)
         if is_dicom_file(path):
             stored.append(path)
         else:
@@ -168,9 +203,24 @@ async def create_study(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@router.post("/{study_id}/segmentations/medsam2", response_model=SegmentationOut)
+@router.post(
+    "/{study_id}/segmentations/medsam2",
+    response_model=SegmentationOut,
+    dependencies=[RequireMedplumDep],
+)
 def segment_with_medsam2(study_id: str, request: SegmentationRequest) -> SegmentationOut:
+    _synthetic_study_or_404(study_id)
+    if not (medsam2_service.endpoint or medsam2_service.adapter_module):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MedSAM2 is not configured; synthetic segmentation is disabled.",
+        )
     result = medsam2_service.segment(study_id=study_id, prompt=request.prompt)
+    if result.get("source") == "mock":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MedSAM2 is not configured; synthetic segmentation is disabled.",
+        )
     result.setdefault("box", request.prompt.model_dump())
     return SegmentationOut(**result)
 
@@ -182,13 +232,18 @@ def segment_with_medsam2(study_id: str, request: SegmentationRequest) -> Segment
 )
 def report_with_qwen_vl(study_id: str, request: ReportRequest) -> ReportOut:
     try:
-        study = repository().client.search_one(
-            "ImagingStudy",
-            {"identifier": f"{IMAGING_STUDY_SYSTEM}|{study_id}"},
-        )
-        if not study:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Imaging study not found.")
+        study = _synthetic_study_or_404(study_id)
+        if medgemma_service.status()["provider"] == "mock":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Imaging report provider is not configured; synthetic reports are disabled.",
+            )
         result = medgemma_service.generate_report(study_id=study_id, request=request)
+        if result.get("source") == "mock":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Imaging report provider is not configured; synthetic reports are disabled.",
+            )
         persisted = repository().upsert_diagnostic_report(
             patient_id=_patient_id(study),
             study_id=study_id,
@@ -225,12 +280,7 @@ def report_with_medgemma(study_id: str, request: ReportRequest) -> ReportOut:
 )
 def review_report(study_id: str, request: ReportReviewIn) -> ReportReviewOut:
     try:
-        study = repository().client.search_one(
-            "ImagingStudy",
-            {"identifier": f"{IMAGING_STUDY_SYSTEM}|{study_id}"},
-        )
-        if not study:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Imaging study not found.")
+        study = _synthetic_study_or_404(study_id)
         report, task = repository().review_diagnostic_report(
             patient_id=_patient_id(study),
             study_id=study_id,

@@ -73,7 +73,7 @@ class ConsultationIn(BaseModel):
     report: str = Field(default="", max_length=200_000)
     duration: str | None = Field(default=None, max_length=32)
     recorded_at: str | None = None
-    audio_base64: str | None = None
+    audio_base64: str | None = Field(default=None, max_length=35_000_000)
     audio_content_type: str = Field(default="audio/wav", max_length=128)
 
 
@@ -82,6 +82,16 @@ class ConsultationOut(BaseModel):
     patient_id: str
     encounter_id: str
     document_ids: dict[str, str] = Field(default_factory=dict)
+
+
+class ConsultationSessionOut(BaseModel):
+    id: str
+    patient_id: str
+    timestamp: str
+    duration: str
+    transcript: str
+    report: str
+    audio_base64: str
 
 
 class DocumentOut(BaseModel):

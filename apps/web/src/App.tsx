@@ -38,7 +38,7 @@ function PatientDirectoryRoute() {
 function PatientImagingRoute() {
   const { patientId } = useParams<{ patientId: string }>();
   if (!patientId) return <Navigate to="/patients" replace />;
-  return <ImagingWorkspace patientId={patientId} />;
+  return <ImagingWorkspace key={patientId} patientId={patientId} />;
 }
 
 function PatientSessionRoute() {
@@ -46,7 +46,7 @@ function PatientSessionRoute() {
   if (!patientId) return <Navigate to="/patients" replace />;
   return (
     <Suspense fallback={<RouteFallback />}>
-      <SessionWorkspace patientId={patientId} />
+      <SessionWorkspace key={patientId} patientId={patientId} />
     </Suspense>
   );
 }

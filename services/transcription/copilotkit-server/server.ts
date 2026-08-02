@@ -9,8 +9,16 @@ dotenv.config();
 
 const app = express();
 
+const allowedOrigins = (process.env.COPILOTKIT_CORS_ORIGINS ??
+  "http://localhost:3000,http://127.0.0.1:3000")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 app.use(cors({
-  origin: "*",
+  origin: (origin, callback) =>
+    !origin || allowedOrigins.includes(origin)
+      ? callback(null, true)
+      : callback(new Error("Origin is not allowed")),
   credentials: true,
 }));
 
@@ -50,6 +58,7 @@ app.use(
 );
 
 const port = Number(process.env.PORT ?? 4000);
-app.listen(port, () => {
-  console.log(`CopilotKit runtime listening at http://localhost:${port}/api/copilotkit`);
+const host = process.env.COPILOTKIT_BIND_HOST ?? "127.0.0.1";
+app.listen(port, host, () => {
+  console.log(`CopilotKit runtime listening at http://${host}:${port}/api/copilotkit`);
 });

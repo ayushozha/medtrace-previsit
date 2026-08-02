@@ -21,8 +21,10 @@ PostgreSQL and Redis. PostgreSQL and Binary data use named Docker volumes.
 | Extraction/projection workflow | `Task` |
 
 Zep is a subordinate semantic memory and knowledge-graph projection. It never owns or updates
-canonical clinical facts or transcripts. Imaging and transcription persistence are separate and
-unchanged.
+canonical clinical facts or transcripts. Imaging metadata/review state is canonical as
+`ImagingStudy`, `DiagnosticReport`, and `Task`; voice visits are `Encounter` plus patient-scoped
+transcript, report, and audio `DocumentReference`/`Binary` resources. Local files and SQLite are
+derived viewer/cache artifacts only.
 
 ## Write sequences
 

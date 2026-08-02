@@ -268,8 +268,8 @@ def pdf_bytes_via_vlm_structured(
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> tuple[list[PageVLMExtract], str]:
     """Return validated page extracts and their traceable text serialization."""
-    dpi_eff = dpi if dpi is not None else int(os.environ.get("PDF_VL_DPI", "150"))
-    max_eff = max_pages if max_pages is not None else int(os.environ.get("PDF_VL_MAX_PAGES", "25"))
+    dpi_eff = min(300, max(72, dpi if dpi is not None else int(os.environ.get("PDF_VL_DPI", "150"))))
+    max_eff = min(25, max(1, max_pages if max_pages is not None else int(os.environ.get("PDF_VL_MAX_PAGES", "25"))))
 
     model = fireworks_vlm_model()
 

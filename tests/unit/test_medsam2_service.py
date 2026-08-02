@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -81,16 +83,54 @@ def test_mock_volumetric_is_deterministic_and_labeled(study, tmp_path):
 
     assert result["volume_ml"] == mask_volume_ml(mask, (3.0, 2.0, 2.0))
 
-    # Same prompt → same id, identical bytes.
     repeat = _service().segment(study_id=study, prompt=_Prompt(slice_index=4))
     assert repeat["id"] == result["id"]
     assert (seg_dir / "mask.bin").read_bytes() == first_bytes
 
-    # Overlays exist exactly on mask-bearing slices.
     urls = result["slice_overlay_urls"]
     assert len(urls) == SLICES
     assert (urls[4] or "").endswith("/slices/0004.png")
     assert result["overlay_url"] == urls[4]
+
+    # Same prompt → same id, identical bytes.
+
+
+def _npz_bytes(**arrays):
+    payload = BytesIO()
+    np.savez(payload, **arrays)
+    return payload.getvalue()
+
+
+def test_npz_mask_parser_rejects_pickle_and_unexpected_members(tmp_path):
+    service = _service()
+
+    with pytest.raises(ValueError, match="Object arrays cannot be loaded"):
+        service._parse_mask_response(
+            _npz_bytes(mask=np.array([[[object()]]], dtype=object)),
+            tmp_path,
+            (1, 1, 1),
+        )
+
+    with pytest.raises(ValueError, match="only a mask array"):
+        service._parse_mask_response(
+            _npz_bytes(mask=np.ones((1, 1, 1)), metadata=np.ones(1)),
+            tmp_path,
+            (1, 1, 1),
+        )
+
+
+def test_npz_mask_parser_preserves_an_exact_ambiguous_shape(tmp_path):
+    mask = np.zeros((2, 3, 2), dtype="uint8")
+    mask[0, 0, 1] = 1
+
+    parsed = _service()._parse_mask_response(_npz_bytes(mask=mask), tmp_path, mask.shape)
+
+    assert np.array_equal(parsed, mask)
+
+
+def test_mask_parser_rejects_unknown_response_format(tmp_path):
+    with pytest.raises(ValueError, match="neither an NPZ mask nor a gzipped NIfTI"):
+        _service()._parse_mask_response(b"not-a-mask", tmp_path, (1, 1, 1))
 
 
 def test_mock_defaults_to_middle_slice(study):

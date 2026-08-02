@@ -724,6 +724,10 @@ a.clinical-home-cta {
   align-self: flex-start;
 }
 
+.transcript-bubble-wrapper.neutral {
+  align-self: flex-start;
+}
+
 .transcript-bubble-wrapper.patient {
   align-self: flex-end;
 }
@@ -764,6 +768,11 @@ a.clinical-home-cta {
   color: #5f6368;
 }
 
+.transcript-bubble-wrapper.neutral .bubble-avatar {
+  background: #f1f3f4;
+  color: #5f6368;
+}
+
 .speaker-name {
   color: #1f1f1f;
 }
@@ -792,6 +801,13 @@ a.clinical-home-cta {
 
 .transcript-bubble-wrapper.patient .bubble-content-card {
   background: #f1f5f9;
+  border-radius: 1.5rem;
+  border: 1px solid var(--clinical-border);
+  color: var(--clinical-body);
+}
+
+.transcript-bubble-wrapper.neutral .bubble-content-card {
+  background: #f8fafc;
   border-radius: 1.5rem;
   border: 1px solid var(--clinical-border);
   color: var(--clinical-body);

@@ -50,14 +50,14 @@ Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MOD
 ### Tests
 
 ```bash
-.venv/bin/pytest -m "not integration"              # 61 tests
+.venv/bin/pytest -m "not integration"              # full offline suite
 .venv/bin/pytest tests/unit/test_rag_chat.py       # single file
 ```
 
 - `integration` hits the **live NCBI PubMed API** — excluded by default. `testpaths = ["tests"]`
   keeps collection out of `services/`.
-- Tests cover `src/medtrace_agent/` only. **`apps/api/` has no tests** — verify API changes with
-  the curl checks below.
+- Tests cover the shared package, provider boundaries, and selected API behavior; verify
+  browser navigation and live provider paths with the runtime checks below.
 - No Python linter/formatter is configured; pytest is the only dev dependency.
 
 ## Architecture
@@ -108,7 +108,7 @@ files; header/child `Communication` resources own chat transcripts.
 
 `GET /api/patients/{id}/snapshot` always uses the FHIR batch mapper.
 
-`/data` is mounted from repo-root `data/`, serving the local demo viewer copy of complete DICOM
+Only `/data/studies` is mounted, serving the local demo viewer copy of complete DICOM
 series, previews, and segmentation overlays. Each study is linked to a canonical Patient through
 Medplum `ImagingStudy`; one representative DICOM is a patient-scoped `Binary` referenced by
 `DocumentReference`. Drafts and clinician review state are `DiagnosticReport` + `Task` resources.
@@ -118,13 +118,15 @@ Medplum `ImagingStudy`; one representative DICOM is a patient-scoped `Binary` re
 
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter** (`MEDSAM2_ADAPTER_MODULE` /
-`MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Fireworks VL
-(`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`); mock without the key.
+`MEDGEMMA_MODEL_ID`) → internal deterministic mock for adapter tests. Public imaging
+routes reject mock results with 503. Reports use Fireworks VL
+(`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`) or a configured HTTP/local provider.
 
 **DICOM handling:** `pydicom`, rescaled via `RescaleSlope`/`RescaleIntercept`, windowed via
 `WindowCenter`/`WindowWidth`. ROI prompts are normalised 0–1 and converted to pixels backend-side.
 The DICOM PatientID is never treated as application identity; API upload requires an existing
-Medplum `Patient.id`. `npm run medplum:seed` registers local synthetic studies idempotently.
+Medplum `Patient.id`. `npm run medplum:seed` does not scan runtime studies. Synthetic DICOM import
+requires an explicit root and a study-to-chart manifest.
 
 ### Web app (`apps/web/`)
 
@@ -142,10 +144,11 @@ file mirroring `apps/api/schemas.py` (`src/lib/types.ts`).
 
 The session workspace and demo check-in dialog share `session.css`; the other routes are pure Tailwind.
 
-**The browser only ever talks to port 3000.** Vite proxies `/api` and `/data` to the API
+Vite proxies `/api` and `/data` to the API
 (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8001`) and `/api/copilotkit` to the CopilotKit
 runtime. `/api/copilotkit` must stay the first proxy entry — Vite matches them in insertion order.
-`VITE_API_BASE_URL` is empty by default and only needed for a cross-origin API.
+`VITE_API_BASE_URL` is empty by default and only needed for a cross-origin API. The
+session REST client defaults to `http://localhost:8010` unless explicitly proxied.
 
 ## Non-obvious gotchas
 

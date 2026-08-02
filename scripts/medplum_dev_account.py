@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Ensure and print local Medplum UI fake accounts for development.
+"""Ensure and print configured local Medplum UI accounts for development.
 
-Medplum ships a default super-admin on first boot. This script also ensures a
-project-scoped clinician (`dev@medtrace.local`) exists for day-to-day use at
-http://localhost:3002.
+This script uses configured super-admin credentials to ensure a non-admin,
+project-scoped clinician exists for day-to-day use at http://localhost:3002.
 
 Requires MEDPLUM_* in `.env` (same ClientApplication used by the API) and a
 reachable Medplum server (`npm run medplum:up`).
@@ -18,13 +17,9 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from medtrace_agent.env import load_repo_env
-
-DEFAULT_SUPER_ADMIN = ("admin@example.com", "medplum_admin")
-DEV_CLINICIAN = ("dev@medtrace.local", "medtrace-dev", "Dev", "Clinician")
-PROJECT_ADMIN = ("medtrace-admin@localhost.dev", "MedtraceAdmin123!")
 
 
 def _env(name: str) -> str:
@@ -34,8 +29,23 @@ def _env(name: str) -> str:
     return value
 
 
+def _credentials(prefix: str) -> tuple[str, str]:
+    return _env(f"{prefix}_EMAIL"), _env(f"{prefix}_PASSWORD")
+
+
 def _base_url() -> str:
-    return _env("MEDPLUM_BASE_URL").rstrip("/")
+    base = _env("MEDPLUM_BASE_URL").rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise SystemExit(
+            "medplum_dev_account.py only operates on a loopback Medplum server; "
+            "refusing MEDPLUM_BASE_URL outside localhost."
+        )
+    return base
 
 
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> tuple[int, dict | str]:
@@ -70,27 +80,26 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _access_token_for_project_admin() -> str:
-    """Exchange a human project-admin login for a bearer token (PKCE)."""
+def _access_token_for_admin() -> str:
+    """Exchange the configured loopback super-admin login for a bearer token (PKCE)."""
     client_id = _env("MEDPLUM_CLIENT_ID")
     client_secret = _env("MEDPLUM_CLIENT_SECRET")
     verifier, challenge = _pkce_pair()
 
-    for email, password in (PROJECT_ADMIN, DEFAULT_SUPER_ADMIN):
-        status, login = _login(
-            email,
-            password,
-            clientId=client_id,
-            codeChallengeMethod="S256",
-            codeChallenge=challenge,
+    email, password = _credentials("MEDPLUM_SUPER_ADMIN")
+    status, login = _login(
+        email,
+        password,
+        clientId=client_id,
+        codeChallengeMethod="S256",
+        codeChallenge=challenge,
+    )
+    if status == 429:
+        raise SystemExit(
+            "Medplum login rate-limited. Wait ~60s and re-run "
+            "`npm run medplum:dev-account`."
         )
-        if status == 429:
-            raise SystemExit(
-                "Medplum login rate-limited. Wait ~60s and re-run "
-                "`npm run medplum:dev-account`."
-            )
-        if status != 200 or not isinstance(login, dict) or not login.get("code"):
-            continue
+    if status == 200 and isinstance(login, dict) and login.get("code"):
         data = urlencode(
             {
                 "grant_type": "authorization_code",
@@ -111,14 +120,14 @@ def _access_token_for_project_admin() -> str:
         if token:
             return token
     raise SystemExit(
-        "Could not obtain a project-admin access token. Sign in once at "
-        "http://localhost:3002 as admin@example.com / medplum_admin, create a "
-        "ClientApplication, and ensure MEDPLUM_* match."
+        "Could not obtain a local admin access token. Verify the configured "
+        "MEDPLUM_SUPER_ADMIN_* credentials and MEDPLUM_CLIENT_* application."
     )
 
 
 def _ensure_dev_clinician() -> str:
-    email, password, first, last = DEV_CLINICIAN
+    email, password = _credentials("MEDPLUM_DEV_CLINICIAN")
+    first, last = "Dev", "Clinician"
     status, _ = _login(email, password)
     if status == 200:
         return "exists"
@@ -128,7 +137,7 @@ def _ensure_dev_clinician() -> str:
             "`npm run medplum:dev-account`."
         )
 
-    token = _access_token_for_project_admin()
+    token = _access_token_for_admin()
     project_id = _env("MEDPLUM_PROJECT_ID")
     status, out = _post_json(
         f"{_base_url()}/admin/projects/{project_id}/invite",
@@ -139,7 +148,7 @@ def _ensure_dev_clinician() -> str:
             "email": email,
             "password": password,
             "sendEmail": False,
-            "membership": {"admin": True},
+            "membership": {"admin": False},
         },
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -165,18 +174,17 @@ def main() -> None:
         ) from exc
 
     state = _ensure_dev_clinician()
-    super_email, super_password = DEFAULT_SUPER_ADMIN
-    dev_email, dev_password, _, _ = DEV_CLINICIAN
+    super_email, _super_password = _credentials("MEDPLUM_SUPER_ADMIN")
+    dev_email, _dev_password = _credentials("MEDPLUM_DEV_CLINICIAN")
 
     print("Medplum admin UI: http://localhost:3002")
     print()
-    print("Default Medplum super-admin (first boot):")
-    print(f"  email:    {super_email}")
-    print(f"  password: {super_password}")
+    print("Configured Medplum super-admin:")
+    print(f"  email: {super_email}")
     print()
     print(f"Dev clinician ({state}):")
     print(f"  email:    {dev_email}")
-    print(f"  password: {dev_password}")
+    print("  password: configured in ignored .env")
     print()
     print("These are local-only demo accounts — do not use in production.")
     return 0

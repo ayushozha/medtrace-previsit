@@ -571,6 +571,10 @@ class MedplumRepository:
         done: bool,
         agent_note: str | None = None,
     ) -> dict[str, Any]:
+        identifier = f"{CHECKLIST_SYSTEM}|{item_id}"
+        existing = self.client.search_one("Task", {"identifier": identifier})
+        if existing and _reference_id(existing.get("for"), "Patient") != patient_id:
+            raise ValueError("Checklist item belongs to a different patient.")
         return self.client.conditional_upsert(
             {
                 "resourceType": "Task",
@@ -587,7 +591,7 @@ class MedplumRepository:
                 "description": text[:1000],
                 **({"businessStatus": {"text": agent_note[:500]}} if agent_note else {}),
             },
-            identifier=f"{CHECKLIST_SYSTEM}|{item_id}",
+            identifier=identifier,
         )
 
     # ---- documents -------------------------------------------------------
@@ -881,16 +885,27 @@ class MedplumRepository:
         )
         if not imaging_study:
             raise ValueError(f"Imaging study {study_id} is not registered in Medplum.")
-        payload = json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        binary = self.client.create_binary(
-            payload,
-            content_type="application/json",
-            security_context=f"Patient/{patient_id}",
-        )
         existing = self.client.search_one(
             "DiagnosticReport",
             {"identifier": f"{DIAGNOSTIC_REPORT_SYSTEM}|{study_id}"},
         )
+        payload = json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        existing_binary_id = binary_id_from_url(
+            (((existing or {}).get("presentedForm") or [{}])[0].get("url"))
+        )
+        if existing_binary_id:
+            binary = self.client.update_binary(
+                existing_binary_id,
+                payload,
+                content_type="application/json",
+                security_context=f"Patient/{patient_id}",
+            )
+        else:
+            binary = self.client.create_binary(
+                payload,
+                content_type="application/json",
+                security_context=f"Patient/{patient_id}",
+            )
         resource = dict(existing or {})
         resource.update(
             {
@@ -993,12 +1008,18 @@ class MedplumRepository:
             extensions.append(self._report_extension("review-note", "valueString", note[:2000]))
         updated["extension"] = extensions
         meta = dict(updated.get("meta") or {})
-        meta["tag"] = [
+        tags = [
             dict(tag)
             for tag in meta.get("tag") or []
             if isinstance(tag, dict)
             and not (decision == "accepted" and tag.get("code") == "ai-extracted-unverified")
         ]
+        if decision != "accepted" and not any(
+            tag.get("system") == TAG_SYSTEM and tag.get("code") == "ai-extracted-unverified"
+            for tag in tags
+        ):
+            tags.append(AI_UNVERIFIED_TAG)
+        meta["tag"] = tags
         updated["meta"] = meta
         updated = self.client.update(updated)
 
@@ -1039,15 +1060,26 @@ class MedplumRepository:
         filename: str,
         content_type: str,
     ) -> dict[str, Any]:
-        source_id = f"consultation:{consultation_id}:{artifact}"
-        binary = self.client.create_binary(
-            data,
-            content_type=content_type,
-            security_context=f"Patient/{patient_id}",
-        )
+        source_id = f"consultation:{patient_id}:{consultation_id}:{artifact}"
         existing = self.client.search_one(
             "DocumentReference",
             {"identifier": f"{DOCUMENT_SYSTEM}|{source_id}"},
+        )
+        existing_attachment = ((existing or {}).get("content") or [{}])[0].get("attachment") or {}
+        existing_binary_id = binary_id_from_url(existing_attachment.get("url"))
+        binary = (
+            self.client.update_binary(
+                existing_binary_id,
+                data,
+                content_type=content_type,
+                security_context=f"Patient/{patient_id}",
+            )
+            if existing_binary_id
+            else self.client.create_binary(
+                data,
+                content_type=content_type,
+                security_context=f"Patient/{patient_id}",
+            )
         )
         resource = dict(existing or {})
         resource.update(
@@ -1105,35 +1137,43 @@ class MedplumRepository:
                 duration_seconds = max(0, int(minutes) * 60 + int(seconds))
             except (ValueError, AttributeError):
                 duration_seconds = None
-        encounter = self.client.conditional_upsert(
-            {
-                "resourceType": "Encounter",
-                "identifier": [{"system": CONSULTATION_SYSTEM, "value": consultation_id}],
-                "status": "finished",
-                "class": {
-                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-                    "code": "AMB",
-                    "display": "ambulatory",
-                },
-                "type": [{"text": "Voice consultation"}],
-                "subject": {"reference": f"Patient/{patient_id}", "display": _display_name(patient)},
-                "period": {"end": now},
-                **(
-                    {
-                        "length": {
-                            "value": duration_seconds,
-                            "unit": "seconds",
-                            "system": "http://unitsofmeasure.org",
-                            "code": "s",
-                        }
-                    }
-                    if duration_seconds is not None
-                    else {}
-                ),
+        encounter_identifier = f"{patient_id}:{consultation_id}"
+        encounter_full_url = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, encounter_identifier)}"
+        encounter_resource = {
+            "resourceType": "Encounter",
+            "identifier": [{"system": CONSULTATION_SYSTEM, "value": encounter_identifier}],
+            "status": "finished",
+            "class": {
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "AMB",
+                "display": "ambulatory",
             },
-            identifier=f"{CONSULTATION_SYSTEM}|{consultation_id}",
-        )
-        documents: dict[str, str] = {}
+            "type": [{"text": "Voice consultation"}],
+            "subject": {"reference": f"Patient/{patient_id}", "display": _display_name(patient)},
+            "period": {"end": now},
+            **(
+                {
+                    "length": {
+                        "value": duration_seconds,
+                        "unit": "seconds",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "s",
+                    }
+                }
+                if duration_seconds is not None
+                else {}
+            ),
+        }
+        entries: list[dict[str, Any]] = [
+            {
+                "fullUrl": encounter_full_url,
+                "resource": encounter_resource,
+                "request": {
+                    "method": "PUT",
+                    "url": f"Encounter?identifier={CONSULTATION_SYSTEM}|{encounter_identifier}",
+                },
+            }
+        ]
         artifacts = [
             ("transcript", transcript.encode("utf-8"), "transcript.txt", "text/plain; charset=utf-8"),
             ("report", report.encode("utf-8"), "clinical-report.md", "text/markdown; charset=utf-8"),
@@ -1141,17 +1181,123 @@ class MedplumRepository:
         if audio is not None:
             artifacts.append(("audio", audio, "consultation-audio", audio_content_type))
         for artifact, data, filename, content_type in artifacts:
-            document = self._upsert_consultation_document(
-                patient_id=patient_id,
-                encounter_id=str(encounter["id"]),
-                consultation_id=consultation_id,
-                artifact=artifact,
-                data=data,
-                filename=filename,
-                content_type=content_type,
+            source_id = f"consultation:{patient_id}:{consultation_id}:{artifact}"
+            binary_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:binary").hex
+            entries.extend(
+                [
+                    {
+                        "resource": {
+                            "resourceType": "Binary",
+                            "id": binary_id,
+                            "contentType": content_type,
+                            "securityContext": {"reference": f"Patient/{patient_id}"},
+                            "data": base64.b64encode(data).decode("ascii"),
+                        },
+                        "request": {"method": "PUT", "url": f"Binary/{binary_id}"},
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "DocumentReference",
+                            "status": "current",
+                            "identifier": [{"system": DOCUMENT_SYSTEM, "value": source_id}],
+                            "meta": {"tag": [
+                                {"system": TAG_SYSTEM, "code": "consultation"},
+                                {"system": TAG_SYSTEM, "code": artifact},
+                            ]},
+                            "type": {"text": "conversation_note"},
+                            "subject": {"reference": f"Patient/{patient_id}"},
+                            "date": utc_now(),
+                            "content": [{"attachment": {
+                                "contentType": content_type,
+                                "url": f"Binary/{binary_id}",
+                                "title": filename,
+                                "size": len(data),
+                            }}],
+                            "context": {"encounter": [{"reference": encounter_full_url}]},
+                        },
+                        "request": {
+                            "method": "PUT",
+                            "url": f"DocumentReference?identifier={DOCUMENT_SYSTEM}|{source_id}",
+                        },
+                    },
+                ]
             )
-            documents[artifact] = str(document.get("id") or "")
-        return {"encounter_id": str(encounter.get("id") or ""), "document_ids": documents}
+        response = self.client.transaction(entries)
+
+        def response_id(index: int, resource_type: str, identifier: str) -> str:
+            response_entry = (response.get("entry") or [{}])[index]
+            location = str((response_entry.get("response") or {}).get("location") or "")
+            if location.startswith(f"{resource_type}/"):
+                return location.removeprefix(f"{resource_type}/").split("/", 1)[0]
+            found = self.client.search_one(resource_type, {"identifier": identifier})
+            return str((found or {}).get("id") or "")
+
+        encounter_id = response_id(
+            0,
+            "Encounter",
+            f"{CONSULTATION_SYSTEM}|{encounter_identifier}",
+        )
+        documents = {
+            artifact: response_id(
+                2 + index * 2,
+                "DocumentReference",
+                f"{DOCUMENT_SYSTEM}|consultation:{patient_id}:{consultation_id}:{artifact}",
+            )
+            for index, (artifact, *_rest) in enumerate(artifacts)
+        }
+        return {"encounter_id": encounter_id, "document_ids": documents}
+
+    def consultation_views(self, patient_id: str) -> list[dict[str, Any]]:
+        """Reconstruct voice-session history from canonical patient-scoped FHIR resources."""
+        resources = self.clinical_resources(patient_id)
+        documents_by_encounter: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for document in resources.get("DocumentReference") or []:
+            if not _tag(document, "consultation"):
+                continue
+            for encounter in (document.get("context") or {}).get("encounter") or []:
+                encounter_id = _reference_id(encounter, "Encounter")
+                if encounter_id:
+                    documents_by_encounter[encounter_id].append(document)
+
+        out: list[dict[str, Any]] = []
+        for encounter in resources.get("Encounter") or []:
+            raw_id = identifier_value(encounter, CONSULTATION_SYSTEM)
+            encounter_id = str(encounter.get("id") or "")
+            if not raw_id or not encounter_id:
+                continue
+            consultation_id = raw_id.removeprefix(f"{patient_id}:")
+            row: dict[str, Any] = {
+                "id": consultation_id,
+                "patient_id": patient_id,
+                "timestamp": str((encounter.get("period") or {}).get("end") or ""),
+                "duration": "0:00",
+                "transcript": "",
+                "report": "",
+                "audio_base64": "",
+            }
+            length = encounter.get("length") or {}
+            if isinstance(length, dict) and length.get("value") is not None:
+                seconds = max(0, int(float(length["value"])))
+                row["duration"] = f"{seconds // 60}:{seconds % 60:02d}"
+            for document in documents_by_encounter.get(encounter_id, []):
+                artifact = next(
+                    (name for name in ("transcript", "report", "audio") if _tag(document, name)),
+                    None,
+                )
+                attachment = ((document.get("content") or [{}])[0].get("attachment") or {})
+                binary_id = binary_id_from_url(attachment.get("url"))
+                if not artifact or not binary_id:
+                    continue
+                data = self.client.read_binary(binary_id)
+                if artifact == "audio":
+                    content_type = str(attachment.get("contentType") or "application/octet-stream")
+                    row["audio_base64"] = (
+                        f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+                    )
+                else:
+                    row[artifact] = data.decode("utf-8", errors="replace")
+            out.append(row)
+        return sorted(out, key=lambda row: row["timestamp"], reverse=True)
 
     def create_extracted_facts(self, *, patient_id: str, doc_id: str, facts: ExtractedClinicalFacts, model_name: str) -> list[str]:
         entries: list[dict[str, Any]] = []
@@ -1291,7 +1437,8 @@ class MedplumRepository:
         return rows[-limit:]
 
     def create_message(self, *, thread: dict[str, Any], patient_id: str, role: str, content: str, request_id: str) -> dict[str, Any]:
-        identifier = f"{request_id}:{role}"
+        thread_id = str(thread["id"])
+        identifier = f"{thread_id}:{request_id}:{role}"
         sent = utc_now()
         resource = {
             "resourceType": "Communication",
@@ -1310,11 +1457,22 @@ class MedplumRepository:
         self.client.update({**thread, "received": sent})
         return message
 
-    def message_by_request(self, request_id: str, role: str) -> dict[str, Any] | None:
-        return self.client.search_one(
+    def message_by_request(self, thread_id: str, request_id: str, role: str) -> dict[str, Any] | None:
+        scoped = self.client.search_one(
+            "Communication",
+            {"identifier": f"{MESSAGE_REQUEST_SYSTEM}|{thread_id}:{request_id}:{role}"},
+        )
+        if scoped:
+            return scoped
+        legacy = self.client.search_one(
             "Communication",
             {"identifier": f"{MESSAGE_REQUEST_SYSTEM}|{request_id}:{role}"},
         )
+        expected = f"Communication/{thread_id}"
+        return legacy if any(
+            isinstance(parent, dict) and parent.get("reference") == expected
+            for parent in (legacy or {}).get("partOf") or []
+        ) else None
 
     def message_view(self, message: dict[str, Any]) -> dict[str, Any]:
         payload = message.get("payload") or []
@@ -1329,7 +1487,7 @@ class MedplumRepository:
         }
 
     def create_zep_projection_task(self, *, patient_id: str, thread_id: str, user_message_id: str, assistant_message_id: str, request_id: str) -> dict[str, Any]:
-        identifier = f"chat:{request_id}"
+        identifier = f"chat:{thread_id}:{request_id}"
         return self.client.conditional_upsert({
             "resourceType": "Task",
             "status": "requested",

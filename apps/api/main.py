@@ -48,7 +48,7 @@ from apps.api.routers import (  # noqa: E402
     medplum_threads,
     studies,
 )
-from medtrace_agent.imaging.storage import data_dir  # noqa: E402
+from medtrace_agent.imaging.storage import studies_dir  # noqa: E402
 from medtrace_agent.ontology import auto_apply_clinical_ontology  # noqa: E402
 
 
@@ -116,4 +116,4 @@ app.include_router(studies.router)
 app.include_router(demo.router)
 
 # Study previews and segmentation overlays are referenced by URL in API responses.
-app.mount("/data", StaticFiles(directory=data_dir()), name="data")
+app.mount("/data/studies", StaticFiles(directory=studies_dir()), name="studies-data")

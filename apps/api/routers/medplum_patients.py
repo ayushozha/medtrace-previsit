@@ -5,7 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import deterministic_summary, raise_medplum_http
+from apps.api.routers.medplum_common import (
+    deterministic_summary,
+    is_synthetic_patient,
+    raise_medplum_http,
+    require_synthetic_patient,
+)
 from apps.api.schemas import (
     AbnormalFindingOut,
     AlertOut,
@@ -35,9 +40,7 @@ def _patient_or_404(patient_id: str) -> dict:
         patient = repository().get_patient(patient_id)
     except MedplumError as exc:
         raise_medplum_http(exc)
-    if not patient:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
-    return patient
+    return require_synthetic_patient(patient)
 
 
 def _view_with_summary(patient: dict, resources: dict) -> PatientOut:
@@ -58,6 +61,8 @@ def list_patients() -> list[PatientOut]:
     try:
         out = []
         for patient in repo.list_patients():
+            if not is_synthetic_patient(patient):
+                continue
             resources = repo.clinical_resources(str(patient["id"]))
             out.append(_view_with_summary(patient, resources))
         return out
@@ -71,6 +76,11 @@ def create_patient(body: CreatePatientIn) -> PatientOut:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="zep_user_id and display_name are required.")
     repo = repository()
     try:
+        if repo.find_patient_by_zep(body.zep_user_id.strip()):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A patient with this Zep identifier already exists.",
+            )
         patient = repo.upsert_patient(
             zep_user_id=body.zep_user_id.strip(),
             display_name=body.display_name.strip(),
@@ -78,10 +88,12 @@ def create_patient(body: CreatePatientIn) -> PatientOut:
             age=body.age,
             sex=body.sex,
             primary_doctor=body.primary_doctor,
-            tags=body.tags,
+            tags=sorted({*body.tags, "synthetic"}),
         )
         resources = repo.clinical_resources(str(patient["id"]))
         return _view_with_summary(patient, resources)
+    except HTTPException:
+        raise
     except MedplumError as exc:
         raise_medplum_http(exc)
 
@@ -97,6 +109,7 @@ def get_patient(patient_id: str) -> PatientOut:
 
 @router.patch("/{patient_id}", response_model=PatientOut, dependencies=[RequireMedplumDep])
 def update_patient(patient_id: str, body: UpdatePatientIn) -> PatientOut:
+    _patient_or_404(patient_id)
     updates = body.model_dump(exclude_unset=True)
     if "display_name" in updates and not str(updates["display_name"] or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="display_name cannot be empty.")
@@ -108,6 +121,8 @@ def update_patient(patient_id: str, body: UpdatePatientIn) -> PatientOut:
         return _view_with_summary(patient, repo.clinical_resources(patient_id))
     except MedplumError as exc:
         raise_medplum_http(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/{patient_id}/summary", response_model=PatientOut, dependencies=[RequireMedplumDep])
@@ -186,3 +201,5 @@ def update_checklist_item(
         )
     except MedplumError as exc:
         raise_medplum_http(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

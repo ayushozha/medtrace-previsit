@@ -24,11 +24,12 @@ the 3D volume viewport.
 # Place the zip at samples/dicom/lidc_chest_ct.zip, then:
 unzip samples/dicom/lidc_chest_ct.zip -d /tmp/lidc
 
-# Option A — the web UI: http://localhost:3000/imaging → "Upload DICOM",
-#   select every .dcm from the extracted folder (one study = the whole series).
+# Option A — select a synthetic patient at http://localhost:3000/patients,
+#   open that patient's Imaging tab, then upload every .dcm in the series.
 
 # Option B — straight to the API (npm run dev:api must be running):
 curl -s -X POST http://127.0.0.1:8001/api/studies \
+  -F patient_id=<synthetic-medplum-patient-id> \
   $(for f in /tmp/lidc/**/*.dcm; do printf -- '-F files=@%s ' "$f"; done)
 # → returns { id, slices: 250, has_volume_geometry: true, ... }
 ```

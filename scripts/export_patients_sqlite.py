@@ -5,7 +5,7 @@ Prefer live Medplum (canonical FHIR store). Fall back to committed synthetic
 fixtures when Medplum is unavailable or ``--source fixtures`` is set.
 
 Binary/PDF payloads are omitted so the file stays small and shareable. Output is
-gitignored under ``data/exports/`` by default (``*.sqlite``).
+gitignored under repo-root ``exports/`` by default (``*.sqlite``), outside served data.
 
 Examples::
 
@@ -26,11 +26,16 @@ from typing import Any
 
 from medtrace_agent.env import load_repo_env
 from medtrace_agent.medplum import MedplumError, medplum_configured
-from medtrace_agent.medplum_repository import CONSULTATION_SYSTEM, identifier_value, repository
+from medtrace_agent.medplum_repository import (
+    CONSULTATION_SYSTEM,
+    TAG_SYSTEM,
+    identifier_value,
+    repository,
+)
 from medtrace_agent.synthetic_fixtures import load_synthetic_store
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_OUT = _REPO_ROOT / "data" / "exports" / "patients.sqlite"
+_DEFAULT_OUT = _REPO_ROOT / "exports" / "patients.sqlite"
 
 SCHEMA_SQL = """
 CREATE TABLE meta (
@@ -365,7 +370,16 @@ def _encounter_views(resources: dict[str, list[dict[str, Any]]]) -> list[dict[st
 
 def export_from_medplum(conn: sqlite3.Connection) -> int:
     repo = repository()
-    patients = repo.list_patients()
+    patients = [
+        patient
+        for patient in repo.list_patients()
+        if any(
+            isinstance(tag, dict)
+            and tag.get("system") == TAG_SYSTEM
+            and tag.get("code") == "synthetic"
+            for tag in (patient.get("meta") or {}).get("tag") or []
+        )
+    ]
     count = 0
     for fhir_patient in patients:
         patient_id = str(fhir_patient.get("id") or "")
@@ -549,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
 
     size_kb = args.out.stat().st_size / 1024
     print(f"Wrote {count} patients from {source} → {args.out} ({size_kb:.1f} KiB)")
-    print("Share this file. Recipients can open it with any SQLite client, e.g.:")
+    print("This export contains synthetic-tagged demo records only. Open it with any SQLite client, e.g.:")
     print(f'  sqlite3 "{args.out}" ".tables"')
     print(f'  sqlite3 "{args.out}" "SELECT id, name, age, risk FROM patients;"')
     return 0

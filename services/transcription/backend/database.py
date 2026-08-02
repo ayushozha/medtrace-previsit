@@ -1,7 +1,10 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "sessions.db")
+DB_PATH = os.environ.get(
+    "TRANSCRIPTION_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "sessions.db"),
+)
 
 def init_db():
     """
@@ -39,7 +42,7 @@ def save_session(session_id: str, timestamp: str, duration: str, transcript: str
     conn.commit()
     conn.close()
 
-def get_all_sessions(patient_id: str | None = None):
+def get_all_sessions(patient_id: str):
     """
     Fetches all saved sessions from the database ordered by timestamp descending.
     """
@@ -47,13 +50,10 @@ def get_all_sessions(patient_id: str | None = None):
     # Return as dictionaries
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    if patient_id:
-        cursor.execute(
-            "SELECT id, timestamp, duration, transcript, report, audio_base64, patient_id FROM sessions WHERE patient_id = ? ORDER BY timestamp DESC",
-            (patient_id,),
-        )
-    else:
-        cursor.execute("SELECT id, timestamp, duration, transcript, report, audio_base64, patient_id FROM sessions ORDER BY timestamp DESC")
+    cursor.execute(
+        "SELECT id, timestamp, duration, transcript, report, audio_base64, patient_id FROM sessions WHERE patient_id = ? ORDER BY timestamp DESC",
+        (patient_id,),
+    )
     rows = cursor.fetchall()
     sessions = []
     for row in rows:
@@ -69,15 +69,28 @@ def get_all_sessions(patient_id: str | None = None):
     conn.close()
     return sessions
 
-def update_session_report(session_id: str, report: str) -> bool:
+def get_session(session_id: str, patient_id: str) -> dict | None:
+    """Return a session only when it belongs to the requested patient."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id, timestamp, duration, transcript, report, audio_base64, patient_id "
+        "FROM sessions WHERE id = ? AND patient_id = ?",
+        (session_id, patient_id),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_session_report(session_id: str, patient_id: str, report: str) -> bool:
     """
     Updates the report column for an existing session. Returns True if a row was updated.
     """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE sessions SET report = ? WHERE id = ?",
-        (report, session_id),
+        "UPDATE sessions SET report = ? WHERE id = ? AND patient_id = ?",
+        (report, session_id, patient_id),
     )
     conn.commit()
     updated = cursor.rowcount > 0

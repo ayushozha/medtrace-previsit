@@ -15,15 +15,20 @@ import httpx
 from agent import graph
 
 DEEPGRAM_BASE = "https://api.deepgram.com"
-DEFAULT_STT_MODEL = "nova-3"
-DEFAULT_TTS_MODEL = "aura-2-thalia-en"
+
+
+def _required_model(name: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required for the Deepgram voice pipeline.")
+    return value
 
 
 class VoicePipeline:
     """
     Orchestrates speech transcription, agent reasoning, and text-to-speech.
 
-    * **STT** — Deepgram ``/v1/listen`` (Nova) with diarization → Clinician/Patient lines.
+    * **STT** — Deepgram ``/v1/listen`` (Nova) with neutral speaker-number diarization.
     * **Agent** — OpenAI-compatible chat via ``OPENAI_*`` (can point at Fireworks).
     * **TTS** — Deepgram ``/v1/speak`` (Aura); optional if the key is missing.
     """
@@ -32,9 +37,6 @@ class VoicePipeline:
         self.deepgram_api_key = (
             os.environ.get("DEEPGRAM_API_KEY") or os.environ.get("DG_API_KEY") or None
         )
-        self.stt_model = os.environ.get("DEEPGRAM_STT_MODEL", DEFAULT_STT_MODEL)
-        self.tts_model = os.environ.get("DEEPGRAM_TTS_MODEL", DEFAULT_TTS_MODEL)
-        self.diarize_model = os.environ.get("DEEPGRAM_DIARIZE_MODEL", "latest")
 
     def _require_deepgram_key(self) -> str:
         if not self.deepgram_api_key:
@@ -50,22 +52,41 @@ class VoicePipeline:
 
     @staticmethod
     def _audio_content_type(audio_bytes: bytes) -> str:
-        is_mp3 = (
+        """Detect common browser/upload containers without relabeling them as WAV."""
+        if audio_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+            return "audio/webm"
+        if audio_bytes.startswith(b"OggS"):
+            return "audio/ogg"
+        if audio_bytes.startswith(b"fLaC"):
+            return "audio/flac"
+        if len(audio_bytes) >= 12 and audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
+            return "audio/wav"
+        if len(audio_bytes) >= 8 and audio_bytes[4:8] == b"ftyp":
+            return "audio/mp4"
+        if (
             audio_bytes.startswith(b"ID3")
             or audio_bytes.startswith(b"\xff\xfb")
             or audio_bytes.startswith(b"\xff\xf3")
             or audio_bytes.startswith(b"\xff\xf2")
-        )
-        return "audio/mpeg" if is_mp3 else "audio/wav"
+        ):
+            return "audio/mpeg"
+        return "application/octet-stream"
 
     @staticmethod
-    def _speaker_label(speaker: int) -> str:
-        """Map Deepgram speaker indices onto the UI's Clinician/Patient labels."""
-        return "Clinician" if speaker % 2 == 0 else "Patient"
+    def _normalize_audio_content_type(content_type: str | None) -> str | None:
+        if not content_type:
+            return None
+        media_type = content_type.partition(";")[0].strip().lower()
+        return media_type if media_type.startswith("audio/") else None
+
+    @staticmethod
+    def _speaker_label(speaker: int | None) -> str:
+        """Keep diarization neutral; a speaker index does not establish a clinical role."""
+        return f"Speaker {speaker}" if speaker is not None and speaker >= 0 else "Speaker"
 
     @classmethod
     def _format_diarized_transcript(cls, payload: dict) -> str:
-        """Build ``Clinician:`` / ``Patient:`` lines from Deepgram utterances or words."""
+        """Build neutral ``Speaker N:`` lines from Deepgram utterances or words."""
         results = payload.get("results") or {}
         utterances = results.get("utterances") or []
         if utterances:
@@ -74,7 +95,8 @@ class VoicePipeline:
                 text = (utt.get("transcript") or "").strip()
                 if not text:
                     continue
-                label = cls._speaker_label(int(utt.get("speaker") or 0))
+                raw_speaker = utt.get("speaker")
+                label = cls._speaker_label(int(raw_speaker) if raw_speaker is not None else None)
                 lines.append(f"{label}: {text}")
             if lines:
                 return "\n".join(lines)
@@ -94,7 +116,8 @@ class VoicePipeline:
         current_speaker: int | None = None
         current_words: list[str] = []
         for word in words:
-            speaker = int(word.get("speaker") or 0)
+            raw_speaker = word.get("speaker")
+            speaker = int(raw_speaker) if raw_speaker is not None else -1
             token = (word.get("punctuated_word") or word.get("word") or "").strip()
             if not token:
                 continue
@@ -113,22 +136,23 @@ class VoicePipeline:
             lines.append(f"{label}: {' '.join(current_words)}")
         return "\n".join(lines)
 
-    async def transcribe_audio(self, audio_bytes: bytes) -> str:
-        """Transcribe audio into a diarized ``Clinician:`` / ``Patient:`` transcript via Deepgram Nova."""
+    async def transcribe_audio(self, audio_bytes: bytes, content_type: str | None = None) -> str:
+        """Transcribe audio into a neutral diarized transcript via Deepgram Nova."""
         self._require_deepgram_key()
         if not audio_bytes:
             return ""
 
         params = {
-            "model": self.stt_model,
-            "diarize_model": self.diarize_model,
+            "model": _required_model("DEEPGRAM_MODEL"),
+            "diarize_model": _required_model("DEEPGRAM_DIARIZE_MODEL"),
             "utterances": "true",
             "smart_format": "true",
             "punctuate": "true",
         }
         headers = {
             **self._auth_headers,
-            "Content-Type": self._audio_content_type(audio_bytes),
+            "Content-Type": self._normalize_audio_content_type(content_type)
+            or self._audio_content_type(audio_bytes),
         }
 
         try:
@@ -158,7 +182,7 @@ class VoicePipeline:
             return b""
 
         params = {
-            "model": self.tts_model,
+            "model": _required_model("DEEPGRAM_TTS_MODEL"),
             "encoding": "mp3",
         }
         headers = {

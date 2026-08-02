@@ -15,6 +15,7 @@ export function PatientChartWorkspace() {
 
   return (
     <CopilotKit
+      key={patientId}
       runtimeUrl="/api/copilotkit"
       useSingleEndpoint={false}
       showDevConsole={import.meta.env.DEV}

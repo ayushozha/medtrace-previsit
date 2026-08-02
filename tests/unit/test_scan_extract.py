@@ -13,6 +13,7 @@ from medtrace_agent.ingest.scan_extract import (
     PageVLMExtract,
     _extract_json_object,
     pdf_to_page_images_png,
+    pdf_bytes_via_vlm_structured,
     serialize_pages_for_ingest,
     vl_extract_single_page,
 )
@@ -57,6 +58,18 @@ def test_pdf_to_page_images_png_rejects_too_many_pages() -> None:
     doc.close()
     with pytest.raises(ValueError, match="max allowed"):
         pdf_to_page_images_png(pdf_bytes, max_pages=2)
+
+
+def test_vlm_pipeline_clamps_render_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    render = MagicMock(return_value=[])
+    monkeypatch.setattr("medtrace_agent.ingest.scan_extract.fireworks_vlm_model", lambda: "test-model")
+    monkeypatch.setattr("medtrace_agent.ingest.scan_extract.pdf_to_page_images_png", render)
+
+    pages, text = pdf_bytes_via_vlm_structured(b"pdf", dpi=100_000, max_pages=100_000)
+
+    assert pages == []
+    assert "Clinical document" in text
+    render.assert_called_once_with(b"pdf", dpi=300, max_pages=25)
 
 
 def test_vl_extract_single_page_parses_llm_json(monkeypatch: pytest.MonkeyPatch) -> None:

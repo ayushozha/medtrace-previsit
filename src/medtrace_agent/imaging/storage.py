@@ -1,8 +1,7 @@
 """On-disk layout for imaging studies.
 
-Single source of truth for where study files live. Everything sits under the repo-root
-``data/`` directory alongside the other data folders (historical imports,
-``data/radiology_note``, …) and is served by FastAPI at ``/data``.
+Single source of truth for where study files live. Everything sits under repo-root
+``data/studies/``; FastAPI mounts only that imaging subtree at ``/data/studies``.
 
     data/studies/{study_id}/preview.png
     data/studies/{study_id}/segmentations/{segmentation_id}.png           (legacy 2D masks)
@@ -21,7 +20,7 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def data_dir() -> Path:
-    """Repo-root ``data/`` — the directory mounted at ``/data``."""
+    """Repo-root ``data/``; only its ``studies`` child is served."""
     return _REPO_ROOT / "data"
 
 

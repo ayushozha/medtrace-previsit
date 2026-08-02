@@ -5,7 +5,11 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import raise_medplum_http, safe_processing_error
+from apps.api.routers.medplum_common import (
+    raise_medplum_http,
+    require_synthetic_patient,
+    safe_processing_error,
+)
 from apps.api.schemas import DocumentKind, DocumentOut, IngestResult
 from medtrace_agent.fireworks_config import fireworks_vlm_model
 from medtrace_agent.ingest.documents import (
@@ -20,6 +24,7 @@ from medtrace_agent.zep.memory import ensure_user
 
 
 router = APIRouter(tags=["documents"])
+_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
 
 def _patient_or_404(patient_id: str) -> dict:
@@ -27,9 +32,7 @@ def _patient_or_404(patient_id: str) -> dict:
         patient = repository().get_patient(patient_id)
     except MedplumError as exc:
         raise_medplum_http(exc)
-    if not patient:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
-    return patient
+    return require_synthetic_patient(patient)
 
 
 @router.get("/api/patients/{patient_id}/documents", response_model=list[DocumentOut], dependencies=[RequireMedplumDep])
@@ -52,13 +55,15 @@ async def upload_document(
     file: UploadFile = File(...),
     document_kind: DocumentKind = Form("clinical_pdf"),
     extract_mode: str = Form("vlm_png"),
-    dpi: int | None = Form(None),
-    max_pages: int | None = Form(None),
+    dpi: int | None = Form(None, ge=72, le=300),
+    max_pages: int | None = Form(None, ge=1, le=25),
 ) -> IngestResult:
     patient = _patient_or_404(patient_id)
-    raw = await file.read()
+    raw = await file.read(_MAX_DOCUMENT_BYTES + 1)
     if not raw:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty upload.")
+    if len(raw) > _MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Document exceeds 25 MiB.")
     filename = file.filename or "upload.bin"
     content_type = file.content_type or ("application/pdf" if document_kind == "clinical_pdf" else "text/plain")
     repo = repository()

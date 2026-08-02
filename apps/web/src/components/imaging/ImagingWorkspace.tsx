@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ImagingStatus, RoiBox, Segmentation, Study, StudyUpload } from '@/lib/types';
+import type { ImagingStatus, RoiBox, Study, StudyUpload } from '@/lib/types';
 import {
   fetchImagingStatus,
   fetchStudies,
@@ -90,9 +90,24 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
   const study = studies.find((s) => s.id === activeStudyId) ?? studies[0] ?? EMPTY_STUDY;
   const hasLoadedStudy = study.id !== EMPTY_STUDY.id;
 
+  const selectPatient = useCallback((nextPatientId: string) => {
+    // Clear patient-owned state in the same event that changes the patient. Waiting for the
+    // fetch effect would briefly expose the previous patient's study and report.
+    setStudies([]);
+    setActiveStudyId(null);
+    setUploadError(null);
+    setSegmentVisible(true);
+    setZoom(100);
+    setVoi(null);
+    setSliceIndex(0);
+    setLayout('stack');
+    setFeedbackOpen(false);
+    setSelectedPatientId(nextPatientId);
+  }, []);
+
   useEffect(() => {
-    if (patientId) setSelectedPatientId(patientId);
-  }, [patientId]);
+    if (patientId && patientId !== selectedPatientId) selectPatient(patientId);
+  }, [patientId, selectPatient, selectedPatientId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -104,8 +119,8 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
 
   useEffect(() => {
     if (patientLocked) return;
-    if (!selectedPatientId && patients.length > 0) setSelectedPatientId(patients[0].id);
-  }, [patients, patientLocked, selectedPatientId]);
+    if (!selectedPatientId && patients.length > 0) selectPatient(patients[0].id);
+  }, [patients, patientLocked, selectPatient, selectedPatientId]);
 
   useEffect(() => {
     if (!selectedPatientId) {
@@ -183,16 +198,10 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
           // Keep only the latest segmentation so each ROI analysis starts fresh.
           segmentations: [{ ...segmentation, box: segmentation.box ?? prompt }],
         }));
-      } catch {
-        const fallback: Segmentation = {
-          id: `seg-${Date.now()}`,
-          label: 'Prompted ROI (offline)',
-          confidence: 0.79,
-          volume_ml: Math.round(prompt.width * prompt.height * 1200) / 10,
-          source: 'mock',
-          box: prompt,
-        };
-        updateStudy(studyId, (s) => ({ ...s, status: 'ready', segmentations: [fallback] }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Segmentation service is unavailable.';
+        setUploadError(`Segmentation failed: ${message}`);
+        updateStudy(studyId, (s) => ({ ...s, status: 'ready' }));
       }
     },
     [sliceIndex, voi, study.id, updateStudy],
@@ -211,26 +220,10 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
       updateStudy(studyId, (s) => ({ ...s, status: 'ready', report }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Report service is unavailable.';
-      updateStudy(studyId, (s) => ({
-        ...s,
-        status: 'ready',
-        report: {
-          summary: 'Fireworks VL draft unavailable',
-          findings:
-            s.segmentations.length > 0
-              ? `AI draft based on ${s.segmentations.length} segmentation ROI(s). ${message}`
-              : message,
-          impression:
-            'Preliminary decision support only. No autonomous diagnosis should be made from this draft.',
-          recommendation: imagingStatus.fireworks_configured
-            ? 'Fireworks VL appears configured. Restart the API if the key changed, then try Generate again.'
-            : 'Set FIREWORKS_API_KEY in the repo .env, restart the API, then generate the report again.',
-          confidence: s.segmentations.length > 0 ? 0.72 : 0.38,
-          source: 'fireworks-vl',
-        },
-      }));
+      setUploadError(`Report generation failed: ${message}`);
+      updateStudy(studyId, (s) => ({ ...s, status: 'ready' }));
     }
-  }, [imagingStatus.fireworks_configured, study.body_part, study.id, study.modality, study.segmentations, updateStudy]);
+  }, [study.body_part, study.id, study.modality, study.segmentations, updateStudy]);
 
   return (
     <div className="bg-[#05070b] text-slate-100">
@@ -258,7 +251,7 @@ export function ImagingWorkspace({ patientId }: { patientId?: string }) {
             patientLocked={patientLocked}
             uploadError={uploadError}
             onFiles={handleFiles}
-            onPatientChange={setSelectedPatientId}
+            onPatientChange={selectPatient}
             onSelectStudy={(id) => {
               setActiveStudyId(id);
               setVoi(null);

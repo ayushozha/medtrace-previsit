@@ -18,6 +18,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command
 
+from model_config import openai_model
+
 # patient_id -> zep_thread_id for Copilot chart memory threads
 _THREAD_CACHE: dict[str, str] = {}
 
@@ -32,7 +34,7 @@ class ClinicalMemoryState(MessagesState):
 
 
 def _api_base() -> str:
-    return (os.environ.get("MEDTRACE_API_URL") or "http://127.0.0.1:8001").rstrip("/")
+    return (os.environ.get("MEDTRACE_API_BASE_URL") or "http://127.0.0.1:8001").rstrip("/")
 
 
 def _last_user_text(messages: list[Any]) -> str:
@@ -129,7 +131,7 @@ async def chat_node(state: ClinicalMemoryState, config: Optional[RunnableConfig]
             from langchain_openai import ChatOpenAI
 
             model = ChatOpenAI(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                model=openai_model(),
                 base_url=os.environ.get("OPENAI_BASE_URL") or None,
                 api_key=os.environ.get("OPENAI_API_KEY") or None,
             )

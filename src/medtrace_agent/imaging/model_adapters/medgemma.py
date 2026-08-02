@@ -36,7 +36,7 @@ class MedGemmaService:
 
     @property
     def fireworks_configured(self) -> bool:
-        return bool(self._fireworks_key)
+        return bool(self._fireworks_key and (os.getenv("FIREWORKS_VL_MODEL") or "").strip())
 
     def generate_report(self, study_id: str, request: Any) -> dict[str, Any]:
         if self.fireworks_configured:
@@ -52,8 +52,9 @@ class MedGemmaService:
 
     def status(self) -> dict[str, Any]:
         ready = self.fireworks_configured
+        provider = "fireworks-vl" if ready else "http" if self.endpoint else "local" if self.model_id else "mock"
         return {
-            "provider": "fireworks-vl" if ready else "mock",
+            "provider": provider,
             "fireworks_configured": ready,
             "model": fireworks_vlm_model() if ready else None,
         }
