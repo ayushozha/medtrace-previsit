@@ -13,11 +13,11 @@ One FastAPI service and one React app, sharing the `src/medtrace_agent/` Python 
 | Surface | Path | Port |
 |---------|------|------|
 | API (clinical + imaging) | `apps/api/` (`apps.api.main:app`) | 8001 |
-| Web app | `apps/web/` — `/`, `/patients/:patientId`, `/imaging`, `/session`, `/yc-medplum-hackathon-demo` | 3000 |
-| Voice prototype | `services/transcription/` (optional; backs `/session`) | 8010 + 4000 |
+| Web app | `apps/web/` — `/`, `/patients`, `/patients/:id`, `/patients/:id/imaging`, `/patients/:id/session`, `/yc-medplum-hackathon-demo` | 3000 |
+| Voice prototype | `services/transcription/` (optional; backs patient visit sessions) | 8010 + 4000 |
 
 - **Clinical** — **Medplum FHIR R4 is the only clinical store** for patients, clinical facts, source documents, and transcripts. **Zep Cloud** is a permanent derived AI-memory/knowledge projection; **Fireworks AI** supplies LLM/VLM calls.
-- **Imaging** — DICOM upload, MedSAM2 segmentation, draft reports. **Runs fully in mock mode with no secrets** — easiest path to an end-to-end demo.
+- **Imaging** — patient-linked `ImagingStudy` metadata, a patient-scoped representative DICOM `Binary`/`DocumentReference`, and preliminary/final `DiagnosticReport` resources are canonical in Medplum. The local demo store holds the complete series used by the viewer. MedSAM2 and Fireworks VL remain optional model providers.
 
 **Topics:** clinical AI · pre-visit intake · evidence provenance · FHIR R4 · eligibility and benefits · human-in-the-loop review
 
@@ -58,10 +58,13 @@ npm --prefix apps/web ci
 
 Copy-Item .env.example .env
 # Start Medplum, create a project + ClientApplication at http://localhost:3002,
-# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
+# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET and MEDPLUM_PROJECT_ID.
+# Add ZEP / FIREWORKS for AI features.
+# Configure local UI credentials in .env, then run npm run medplum:dev-account.
 
 npm run medplum:up
 npm run medplum:bootstrap
+npm run medplum:dev-account
 npm run medplum:seed
 
 npm run dev          # api :8001, web :3000
@@ -79,11 +82,14 @@ npm --prefix apps/web ci
 
 cp .env.example .env
 # Start Medplum, create a project + ClientApplication at http://localhost:3002,
-# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET. Add ZEP / FIREWORKS for AI features.
-# Imaging works without secrets (deterministic mock).
+# then fill MEDPLUM_CLIENT_ID / MEDPLUM_CLIENT_SECRET and MEDPLUM_PROJECT_ID.
+# Add ZEP / FIREWORKS for AI features.
+# Public imaging inference requires a configured Fireworks, HTTP, or local model provider.
+# Configure local UI credentials in .env, then run npm run medplum:dev-account.
 
 npm run medplum:up
 npm run medplum:bootstrap
+npm run medplum:dev-account
 npm run medplum:seed
 npm run dev          # api :8001, web :3000
 ```
@@ -93,9 +99,10 @@ npm run dev          # api :8001, web :3000
 | `npm run dev` | api + web + Medplum→Zep projection worker |
 | `npm run dev:api` | FastAPI only |
 | `npm run dev:web` | Vite only |
-| `npm run dev:transcription` | voice backend (8010) + CopilotKit runtime (4000) |
+| `npm run dev:transcription` | voice + chart CopilotKit runtime (8010, 4000; `chart_router`) |
 | `npm run medplum:up` / `medplum:down` / `medplum:logs` | pinned local Medplum stack |
-| `npm run medplum:bootstrap` / `medplum:seed` | verify credentials / idempotently import synthetic fixtures |
+| `npm run medplum:bootstrap` / `medplum:dev-account` / `medplum:seed` | verify credentials / fake UI login / idempotently import synthetic patient, document, and fact fixtures |
+| `npm run medplum:export-sqlite` | portable SQLite dump of synthetic-tagged patient charts (`exports/patients.sqlite`) |
 | `npm run lint` / `npm run build` | TypeScript check / Vite build (`apps/web`) |
 | `npm run test:py` | `python -m pytest -m "not integration"` in the activated venv |
 
@@ -228,14 +235,14 @@ flowchart LR
   ZEP --> AG
 ```
 
-- **Web** talks only to port 3000; Vite proxies `/api` and `/data` to the API, and `/api/copilotkit` to the transcription runtime.
+- **Web** uses Vite proxies for the main API and CopilotKit; session REST defaults to port 8010 unless `VITE_TRANSCRIPTION_API_URL` supplies a proxy URL.
 - **Agent** — default `chat_with_memory` (one LLM call with Zep context + document catalog). Optional Deep Agent (`deep` flag) uses Zep tools + PubMed.
-- **Medplum** — canonical `Patient`, clinical resources, `Binary` + `DocumentReference`, `Communication` transcripts, `Provenance`, and durable `Task` work.
+- **Medplum** — canonical `Patient`, clinical resources, patient-scoped `Binary` + `DocumentReference`, `ImagingStudy`, `DiagnosticReport`, `Communication` transcripts, `Provenance`, and durable `Task` work.
 - **Zep** — subordinate semantic memory and knowledge projection. Dashboard reads and transcript ownership never depend on Zep availability.
 
 ### LLM layer
 
-Every chat and PDF-vision call goes through `fireworks_chat_client()` (`medtrace_agent.fireworks_config`) against an **OpenAI-compatible** endpoint — **Fireworks AI** by default (`FIREWORKS_BASE_URL`, `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`).
+Clinical package chat and PDF-vision calls use `fireworks_chat_client()` (`medtrace_agent.fireworks_config`) against an **OpenAI-compatible** endpoint — **Fireworks AI** by default (`FIREWORKS_BASE_URL`, `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`). The separate transcription/chart agents read `OPENAI_*` directly.
 
 - `FIREWORKS_VLM_API` — `chat` (`/v1/chat/completions`, default) or `completions` (`<image>`-prompt style).
 - `FIREWORKS_REASONING_EFFORT=none` — keeps Qwen3-style CoT out of `reasoning_content` so JSON/text lands in `content`.
@@ -305,7 +312,18 @@ flowchart TB
 
 ### Imaging
 
-`MedSAM2Service` / report adapters resolve in order: **HTTP endpoint** → **local adapter** → **deterministic mock**. Reports use Qwen VL via Nebius only when both `NEBIUS_API_KEY` and env-driven `NEBIUS_QWEN_VL_MODEL` are set; a partial pair fails visibly instead of silently falling back. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
+`MedSAM2Service` / report adapters resolve in order: **Fireworks VL** (`FIREWORKS_API_KEY`) → **HTTP endpoint** → **local adapter**. The adapters retain deterministic fixtures for unit tests, but public inference routes reject those fixtures with HTTP 503. DICOM previews use pydicom with rescale + windowing; ROI prompts are normalized 0–1 and converted to pixels server-side.
+
+Every upload must select a canonical Medplum Patient. The backend writes an `ImagingStudy`
+containing every DICOM instance UID and stores one representative DICOM object as a
+patient-scoped `Binary` referenced by `DocumentReference`; the complete pixel series stays in
+`data/studies/` for the viewer. Generated reports are preliminary `DiagnosticReport` resources.
+Clinician accept/correction actions update the report and a linked review `Task`.
+
+`npm run medplum:seed` idempotently maps committed synthetic patient data, source notes, and
+placeholder documents. DICOM registration is intentionally opt-in so runtime uploads are never
+assigned to fixture patients: pass `--include-dicom`, an explicit `--dicom-root`, and a JSON
+`--dicom-manifest` mapping every study directory name to its synthetic chart id.
 
 Sample DICOM for uploads (ships with pydicom):
 
@@ -414,20 +432,20 @@ See **`.env.example`** for every variable. Comments must be on their own lines �
 |------|-----------|
 | **LLM** | `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, `FIREWORKS_MODEL`, `FIREWORKS_VL_MODEL`, `FIREWORKS_VLM_API`, `FIREWORKS_REASONING_EFFORT` |
 | **Memory** | `ZEP_API_KEY`, `AUTO_APPLY_ZEP_ONTOLOGY` |
-| **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET` |
+| **Persistence** | `MEDPLUM_BASE_URL`, `MEDPLUM_CLIENT_ID`, `MEDPLUM_CLIENT_SECRET`, `MEDPLUM_PROJECT_ID` (local dev-account helper) |
 | **PDF caps** | `PDF_VL_MAX_PAGES`, `PDF_VL_DPI` |
 | **PubMed** | `NCBI_EMAIL`, `NCBI_API_KEY` (optional) |
-| **Voice `/session`** | `GEMINI_API_KEY` (transcription); `OPENAI_*` for report agent / TTS (can point at Fireworks for chat) |
-| **Imaging draft** | `NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, and `NEBIUS_QWEN_VL_MODEL` are an all-or-nothing pair/path |
+| **Voice visit session** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_TTS_MODEL`, `DEEPGRAM_DIARIZE_MODEL`; `OPENAI_*` for report agent (can point at Fireworks) |
+| **Imaging draft** | `FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL` (same VL model as PDF ingest) |
 | **YC demo workflow** | `YC_DEMO_PATIENT_ID`, distinct 32+ character `YC_DEMO_CHECKIN_SIGNING_KEY` and `YC_DEMO_ACCESS_TOKEN`, plus server-owned `YC_DEMO_OPERATOR_ID` / `YC_DEMO_OPERATOR_NAME` |
-| **Deepgram** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
+| **Deepgram (YC demo)** | `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL`, `DEEPGRAM_DIARIZE_MODEL` (`latest`, `v1`, or `v2`) |
 | **Moss** | `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `MOSS_INDEX_NAME`, `MOSS_MODEL_ID`, required `MOSS_DISABLE_TELEMETRY=1`; endpoint overrides must be unset |
 | **OpenAI demo extraction** | `OPENAI_API_KEY`, `OPENAI_MODEL`; leave `OPENAI_BASE_URL` empty for OpenAI |
 | **Medplum demo Patient** | `YC_DEMO_PATIENT_ID` plus the exact synthetic/demo/Stedi tags and Zep identifier created by the provisioner |
 | **Stedi test mode** | `STEDI_TEST_API_KEY` plus the exact documented Aetna/Jane Doe values already shown in `.env.example` |
 | **CORS** | `API_CORS_ORIGINS` (defaults include localhost:3000) |
 
-Clinical data routes return **503** until server-side Medplum client credentials are configured. Core patient, document, transcript, and dashboard storage remains available if Zep is down. Imaging routes are unchanged and degrade to deterministic mock.
+Clinical and imaging persistence routes return **503** until server-side Medplum client credentials are configured. Core patient, document, imaging metadata/report, transcript, and dashboard storage remains available if Zep is down. Public imaging inference also returns **503** unless a real Fireworks, HTTP, or local model provider is configured; uploads are never represented as canonical unless the Medplum write succeeds.
 
 ---
 

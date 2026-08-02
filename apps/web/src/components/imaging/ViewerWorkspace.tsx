@@ -67,23 +67,43 @@ function RoiBoxOverlay({ box, label, className }: { box: RoiBox; label: string; 
 
 function SegmentationOverlay({
   segmentations,
+  sliceIndex,
   zoom,
 }: {
   segmentations: Segmentation[];
+  sliceIndex: number;
   zoom: number;
 }) {
   return (
     <>
-      {segmentations.map((segmentation, index) =>
-        segmentation.overlay_url ? (
-          <img
-            key={`${segmentation.id}-${index}`}
-            className="pointer-events-none absolute inset-0 h-full w-full object-contain transition-transform duration-200"
-            src={segmentation.overlay_url}
-            alt={`Segmentation overlay ${index + 1}`}
-            style={{ transform: `scale(${zoom / 100})` }}
-          />
-        ) : (
+      {segmentations.map((segmentation, index) => {
+        // Volumetric masks carry one overlay per slice; show the current slice's, and
+        // nothing at all on slices the mask does not reach.
+        const perSlice = segmentation.slice_overlay_urls ?? [];
+        const isVolumetric = perSlice.length > 0 || Boolean(segmentation.mask_url);
+        const overlayUrl = isVolumetric
+          ? perSlice[sliceIndex] ?? null
+          : segmentation.overlay_url ?? null;
+
+        if (overlayUrl) {
+          return (
+            <div key={`${segmentation.id}-${index}`} className="pointer-events-none absolute inset-0">
+              <img
+                className="absolute inset-0 h-full w-full object-contain transition-transform duration-200"
+                src={overlayUrl}
+                alt={`Segmentation overlay ${index + 1}`}
+                style={{ transform: `scale(${zoom / 100})` }}
+              />
+              {segmentation.source === 'mock' && (
+                <span className="absolute left-4 top-12 rounded-sm border border-amber-300/50 bg-[#241a04]/90 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-100">
+                  Mock mask — no model
+                </span>
+              )}
+            </div>
+          );
+        }
+        if (isVolumetric) return null;
+        return (
           <RoiBoxOverlay
             key={`${segmentation.id}-${index}`}
             box={segmentation.box}
@@ -99,8 +119,8 @@ function SegmentationOverlay({
                 : 'border-cyan-300/90 bg-cyan-300/10 shadow-[0_0_30px_rgba(103,232,249,0.35)]'
             }
           />
-        ),
-      )}
+        );
+      })}
     </>
   );
 }
@@ -333,6 +353,9 @@ export function ViewerWorkspace({
           <MprViewport
             imageIds={buildImageIds(study.dicom_url ?? '', study.slices, study.slice_urls)}
             voi={voi}
+            modality={study.modality}
+            segmentation={study.segmentations[0] ?? null}
+            segmentVisible={segmentVisible}
             onError={setRenderError}
           />
           {renderError && (
@@ -439,7 +462,11 @@ export function ViewerWorkspace({
           />
 
           {segmentVisible && study.segmentations.length > 0 && (
-            <SegmentationOverlay segmentations={study.segmentations} zoom={zoom} />
+            <SegmentationOverlay
+              segmentations={study.segmentations}
+              sliceIndex={sliceIndex}
+              zoom={zoom}
+            />
           )}
 
           {draftRoi && (

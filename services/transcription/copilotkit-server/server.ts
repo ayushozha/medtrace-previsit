@@ -9,15 +9,39 @@ dotenv.config();
 
 const app = express();
 
+const allowedOrigins = (process.env.COPILOTKIT_CORS_ORIGINS ??
+  "http://localhost:3000,http://127.0.0.1:3000")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 app.use(cors({
-  origin: "*",
+  origin: (origin, callback) =>
+    !origin || allowedOrigins.includes(origin)
+      ? callback(null, true)
+      : callback(new Error("Origin is not allowed")),
   credentials: true,
 }));
 
+const agentBase = process.env.AGENT_URL || "http://localhost:8010";
+
+const base = agentBase.replace(/\/$/, "");
+
 const runtime = new CopilotRuntime({
   agents: {
+    // /session document co-editor — leave behavior unchanged
     predictive_state_updates: new LangGraphHttpAgent({
-      url: process.env.AGENT_URL || "http://localhost:8010",
+      url: agentBase,
+    }),
+    // Patient chart: auto-router (default UI agent)
+    chart_router: new LangGraphHttpAgent({
+      url: `${base}/router`,
+    }),
+    // Specialists (kept for debugging / direct use; router embeds collab+memory)
+    dashboard_clinical: new LangGraphHttpAgent({
+      url: `${base}/dashboard`,
+    }),
+    clinical_memory: new LangGraphHttpAgent({
+      url: `${base}/memory`,
     }),
   },
 });
@@ -34,6 +58,7 @@ app.use(
 );
 
 const port = Number(process.env.PORT ?? 4000);
-app.listen(port, () => {
-  console.log(`CopilotKit runtime listening at http://localhost:${port}/api/copilotkit`);
+const host = process.env.COPILOTKIT_BIND_HOST ?? "127.0.0.1";
+app.listen(port, host, () => {
+  console.log(`CopilotKit runtime listening at http://${host}:${port}/api/copilotkit`);
 });

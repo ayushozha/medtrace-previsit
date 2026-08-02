@@ -36,11 +36,18 @@ dev = [
 # DICOM handling + preview rendering for the imaging routes (apps/api/routers/studies.py).
 # Without these the imaging endpoints raise at call time; the rest of the API still runs.
 imaging = [
+    "nibabel>=5.2",
     "numpy>=1.26",
     "pillow>=10.0",
     "pydicom>=2.4.4",
+    # Pixel decoders for compressed transfer syntaxes. Real clinical DICOM is almost
+    # always compressed (JPEG Lossless, JPEG-LS, JPEG 2000); without these,
+    # ``ds.pixel_array`` raises and server-side volume assembly fails.
+    "pylibjpeg>=2.0",
+    "pylibjpeg-libjpeg>=2.1",
+    "pylibjpeg-openjpeg>=2.1",
 ]
-# Local MedGemma inference (MEDGEMMA_MODEL_ID); not needed for the Nebius/Qwen or mock paths.
+# Local MedGemma inference (MEDGEMMA_MODEL_ID); not needed for the Fireworks VL or mock paths.
 medgemma-local = [
     "accelerate>=0.30",
     "torch>=2.2",

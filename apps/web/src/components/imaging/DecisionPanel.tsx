@@ -66,7 +66,7 @@ export function DecisionPanel({
                   <Sparkles className="h-4 w-4" />
                 )}
               </span>
-              <h3 className="text-sm font-semibold text-white">Qwen VL Report</h3>
+              <h3 className="text-sm font-semibold text-white">Fireworks VL Report</h3>
             </div>
             <button
               className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-400/15 disabled:cursor-wait disabled:opacity-70"
@@ -81,12 +81,12 @@ export function DecisionPanel({
           <p
             className={cn(
               'mb-3 text-xs font-medium',
-              imagingStatus.nebius_configured ? 'text-emerald-300' : 'text-amber-300',
+              imagingStatus.fireworks_configured ? 'text-emerald-300' : 'text-amber-300',
             )}
           >
-            {imagingStatus.nebius_configured
+            {imagingStatus.fireworks_configured
               ? `Backend model ready: ${imagingStatus.model}`
-              : 'Backend is in mock mode. Set NEBIUS_API_KEY in the repo .env and restart the API.'}
+              : 'Backend is in mock mode. Set FIREWORKS_API_KEY in the repo .env and restart the API.'}
           </p>
           <p className="text-sm leading-6 text-slate-300">{study.report.summary}</p>
 

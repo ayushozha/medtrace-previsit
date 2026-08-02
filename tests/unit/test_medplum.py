@@ -6,14 +6,21 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from apps.api.routers import medplum_threads
 from medtrace_agent.medplum import MedplumClient, MedplumError
 from medtrace_agent.medplum_extraction import facts_from_plain_text, facts_from_vlm_pages
+from apps.api.routers.medplum_common import is_synthetic_patient
 from medtrace_agent.medplum_repository import (
     AI_UNVERIFIED_TAG,
+    CHECKLIST_SYSTEM,
+    CONSULTATION_SYSTEM,
     FACT_SYSTEM,
     MedplumRepository,
+    TAG_SYSTEM,
     ZEP_USER_SYSTEM,
+    binary_id_from_url,
 )
 
 
@@ -135,6 +142,42 @@ def test_update_uses_version_if_match_and_surfaces_conflict(
     assert caught.value.status_code == 412
 
 
+def test_binary_upload_sets_patient_security_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: response(
+            200,
+            {"access_token": "token", "expires_in": 3600},
+            "http://localhost:8103/oauth2/token",
+        ),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs["headers"])
+        return response(201, {"resourceType": "Binary", "id": "b1"}, url)
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    result = MedplumClient(client_id="client", client_secret="secret").create_binary(
+        b"synthetic",
+        content_type="text/plain",
+        security_context="Patient/p1",
+    )
+    assert result["id"] == "b1"
+    assert captured["X-Security-Context"] == "Patient/p1"
+
+
+def test_binary_id_parses_fhir_and_self_hosted_storage_urls() -> None:
+    assert binary_id_from_url("Binary/binary-1") == "binary-1"
+    assert (
+        binary_id_from_url("http://localhost:8103/storage/binary-2/object-key?Signature=test")
+        == "binary-2"
+    )
+
+
 def test_client_rejects_external_pagination_link(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         httpx,
@@ -160,6 +203,14 @@ def test_plain_text_extraction_is_conservative() -> None:
     assert facts.medications == []
     assert facts.observations[0].name == "HbA1c"
     assert facts.observations[0].value == "8.4"
+
+
+def test_unauthenticated_demo_boundary_accepts_only_synthetic_patients() -> None:
+    assert is_synthetic_patient(
+        {"meta": {"tag": [{"system": TAG_SYSTEM, "code": "synthetic"}]}}
+    )
+    assert not is_synthetic_patient({"meta": {"tag": []}})
+    assert not is_synthetic_patient(None)
 
 
 def test_vlm_pages_convert_to_typed_facts() -> None:
@@ -219,6 +270,189 @@ def test_patient_view_uses_stable_zep_identifier() -> None:
     assert view["sex"] == "F"
 
 
+def test_checklist_upsert_rejects_an_item_owned_by_another_patient() -> None:
+    class ChecklistClient:
+        def search_one(self, resource_type, params):
+            assert resource_type == "Task"
+            assert params == {"identifier": f"{CHECKLIST_SYSTEM}|item-1"}
+            return {"resourceType": "Task", "for": {"reference": "Patient/patient-a"}}
+
+        def conditional_upsert(self, resource, *, identifier):  # pragma: no cover
+            raise AssertionError("A cross-patient Task must not be written")
+
+    repo = MedplumRepository(ChecklistClient())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="different patient"):
+        repo.upsert_checklist_item(
+            patient_id="patient-b",
+            item_id="item-1",
+            text="Verify medication",
+            done=False,
+        )
+
+
+def test_consultation_identifiers_are_patient_scoped() -> None:
+    class ConsultationClient:
+        def __init__(self):
+            self.identifiers = []
+
+        def read(self, resource_type, resource_id):
+            return {"resourceType": resource_type, "id": resource_id, "name": [{"text": "Patient"}]}
+
+        def transaction(self, entries):
+            self.identifiers.extend(entry["request"]["url"] for entry in entries)
+            return {
+                "entry": [
+                    {"response": {"location": f"{entry['resource']['resourceType']}/resource-{index}/_history/1"}}
+                    for index, entry in enumerate(entries)
+                ]
+            }
+
+    client = ConsultationClient()
+    repo = MedplumRepository(client)  # type: ignore[arg-type]
+
+    repo.upsert_consultation(
+        patient_id="patient-a",
+        consultation_id="session-1",
+        transcript="Transcript",
+        report="Report",
+    )
+    patient_a_identifiers = set(client.identifiers)
+    client.identifiers.clear()
+    repo.upsert_consultation(
+        patient_id="patient-b",
+        consultation_id="session-1",
+        transcript="Transcript",
+        report="Report",
+    )
+
+    assert any("patient-a" in identifier for identifier in patient_a_identifiers)
+    assert any("patient-b" in identifier for identifier in client.identifiers)
+    assert patient_a_identifiers.isdisjoint(client.identifiers)
+
+
+def test_message_request_lookup_never_crosses_threads() -> None:
+    class MessageClient:
+        def search_one(self, resource_type, params):
+            assert resource_type == "Communication"
+            identifier = params["identifier"]
+            if identifier.endswith("|thread-b:request-1:user"):
+                return None
+            if identifier.endswith("|request-1:user"):
+                return {
+                    "resourceType": "Communication",
+                    "id": "message-a",
+                    "partOf": [{"reference": "Communication/thread-a"}],
+                }
+            return None
+
+    repo = MedplumRepository(MessageClient())  # type: ignore[arg-type]
+
+    assert repo.message_by_request("thread-b", "request-1", "user") is None
+    assert repo.message_by_request("thread-a", "request-1", "user") == {
+        "resourceType": "Communication",
+        "id": "message-a",
+        "partOf": [{"reference": "Communication/thread-a"}],
+    }
+
+
+def test_message_history_rejects_a_non_synthetic_thread_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Repo:
+        def thread_by_zep(self, _thread_id):
+            return {"id": "thread-resource", "subject": {"reference": "Patient/real-patient"}}
+
+        def get_patient(self, _patient_id):
+            return {"resourceType": "Patient", "id": "real-patient", "meta": {"tag": []}}
+
+        def list_messages(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("Messages must not be read across the synthetic boundary")
+
+    monkeypatch.setattr(medplum_threads, "repository", lambda: Repo())
+    with pytest.raises(HTTPException) as exc_info:
+        medplum_threads.list_messages("external-thread")
+    assert exc_info.value.status_code == 404
+
+
+def test_consultation_history_reconstructs_multiple_canonical_sessions() -> None:
+    class BinaryClient:
+        def read_binary(self, binary_id):
+            return {
+                "transcript-1": b"First transcript",
+                "report-1": b"First report",
+                "transcript-2": b"Second transcript",
+                "report-2": b"Second report",
+            }[binary_id]
+
+    repo = MedplumRepository(BinaryClient())  # type: ignore[arg-type]
+    repo.clinical_resources = lambda _patient_id: {  # type: ignore[method-assign]
+        "Encounter": [
+            {
+                "resourceType": "Encounter",
+                "id": "enc-1",
+                "identifier": [{"system": CONSULTATION_SYSTEM, "value": "patient-a:session-1"}],
+                "period": {"end": "2026-08-01T10:00:00Z"},
+                "length": {"value": 65},
+            },
+            {
+                "resourceType": "Encounter",
+                "id": "enc-2",
+                "identifier": [{"system": CONSULTATION_SYSTEM, "value": "patient-a:session-2"}],
+                "period": {"end": "2026-08-01T11:00:00Z"},
+            },
+        ],
+        "DocumentReference": [
+            {
+                "meta": {"tag": [{"system": TAG_SYSTEM, "code": "consultation"}, {"system": TAG_SYSTEM, "code": artifact}]},
+                "context": {"encounter": [{"reference": f"Encounter/enc-{index}"}]},
+                "content": [{"attachment": {"url": f"Binary/{artifact}-{index}", "contentType": "text/plain"}}],
+            }
+            for index in (1, 2)
+            for artifact in ("transcript", "report")
+        ],
+    }
+
+    rows = repo.consultation_views("patient-a")
+
+    assert [row["id"] for row in rows] == ["session-2", "session-1"]
+    assert rows[0]["transcript"] == "Second transcript"
+    assert rows[1]["duration"] == "1:05"
+
+
+def test_diagnostic_report_regeneration_reuses_its_binary() -> None:
+    class ReportClient:
+        def __init__(self) -> None:
+            self.binary_updates: list[str] = []
+
+        def search_one(self, resource_type, params):
+            if resource_type == "ImagingStudy":
+                return {"resourceType": "ImagingStudy", "id": "study-resource"}
+            return {
+                "resourceType": "DiagnosticReport",
+                "id": "report-1",
+                "presentedForm": [{"url": "Binary/report-binary"}],
+            }
+
+        def update_binary(self, binary_id, data, **kwargs):
+            self.binary_updates.append(binary_id)
+            return {"resourceType": "Binary", "id": binary_id}
+
+        def create_binary(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("Regeneration must not orphan a new Binary")
+
+        def update(self, resource):
+            return resource
+
+    client = ReportClient()
+    repo = MedplumRepository(client)  # type: ignore[arg-type]
+    result = repo.upsert_diagnostic_report(
+        patient_id="patient-a",
+        study_id="study-a",
+        report={"summary": "Updated", "source": "http"},
+    )
+
+    assert client.binary_updates == ["report-binary"]
+    assert result["presentedForm"][0]["url"] == "Binary/report-binary"
+
+
 def test_repository_decodes_approved_reconstruction_context() -> None:
     payload = {"workflow_state": "complete", "draft": {"summary": "Missed metformin doses"}}
     resources = {
@@ -250,3 +484,39 @@ def test_repository_decodes_approved_reconstruction_context() -> None:
             "payload": payload,
         }
     ]
+
+
+def test_needs_correction_restores_unverified_report_tag() -> None:
+    class ReviewClient:
+        def __init__(self) -> None:
+            self.report = {
+                "resourceType": "DiagnosticReport",
+                "id": "report-1",
+                "status": "preliminary",
+                "meta": {"tag": [AI_UNVERIFIED_TAG]},
+                "extension": [],
+            }
+
+        def search_one(self, resource_type, params):
+            assert resource_type == "DiagnosticReport"
+            return self.report
+
+        def update(self, resource):
+            self.report = resource
+            return resource
+
+        def conditional_upsert(self, resource, *, identifier):
+            return {**resource, "id": "task-1"}
+
+    client = ReviewClient()
+    repo = MedplumRepository(client)  # type: ignore[arg-type]
+    accepted, _ = repo.review_diagnostic_report(
+        patient_id="patient-1", study_id="study-1", decision="accepted"
+    )
+    assert AI_UNVERIFIED_TAG not in accepted["meta"]["tag"]
+
+    corrected, _ = repo.review_diagnostic_report(
+        patient_id="patient-1", study_id="study-1", decision="needs-correction"
+    )
+    assert corrected["status"] == "preliminary"
+    assert corrected["meta"]["tag"] == [AI_UNVERIFIED_TAG]

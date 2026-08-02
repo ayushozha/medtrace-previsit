@@ -53,7 +53,20 @@ function isAbort(err: unknown): boolean {
  * genuine API 500 — those carry a JSON `detail` from uvicorn.
  */
 async function isUnreachable(res: Response): Promise<boolean> {
-  if (res.status === 502 || res.status === 503 || res.status === 504) return true;
+  // Proxy gateway failures (backend down / still booting). Do NOT treat a real FastAPI
+  // JSON 503 (e.g. Medplum not configured) as unreachable — those have a `detail` body.
+  if (res.status === 502 || res.status === 504) return true;
+  if (res.status === 503) {
+    const body = (await res.clone().text()).trim();
+    if (!body) return true;
+    try {
+      const payload = JSON.parse(body) as { detail?: unknown };
+      if (payload && typeof payload === 'object' && 'detail' in payload) return false;
+    } catch {
+      return true;
+    }
+    return true;
+  }
   if (res.status !== 500) return false;
   return (await res.clone().text()).trim().length === 0;
 }
@@ -118,6 +131,19 @@ export function apiPost<TResp, TBody = unknown>(
   });
 }
 
+export function apiPatch<TResp, TBody = unknown>(
+  path: string,
+  body: TBody,
+  signal?: AbortSignal,
+): Promise<TResp> {
+  return request<TResp>(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
 export async function apiUpload<TResp>(
   path: string,
   file: File,
@@ -151,12 +177,16 @@ export async function apiUpload<TResp>(
 export async function uploadFiles<TResp>(
   path: string,
   files: File[],
+  fields: Record<string, string> = {},
   signal?: AbortSignal,
   field = 'files',
 ): Promise<TResp> {
   const fd = new FormData();
   for (const file of files) {
     fd.append(field, file, file.name);
+  }
+  for (const [key, value] of Object.entries(fields)) {
+    fd.append(key, value);
   }
   const res = await fetch(`${API_BASE_URL}${path}`, {method: 'POST', body: fd, signal});
   if (!res.ok) {

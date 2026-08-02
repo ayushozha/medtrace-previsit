@@ -4,6 +4,8 @@ import type { LabTrend } from '@/lib/types';
 
 interface LabTrendsProps {
   labs: LabTrend[];
+  /** Optional agent-driven highlight (case-insensitive substring match on test name). */
+  highlightTest?: string;
 }
 
 /** First numeric value embedded in a lab string like "142 mg/dL" or "7.2%". */
@@ -69,7 +71,8 @@ function LabSparkline({ lab }: { lab: LabTrend }) {
   );
 }
 
-export function LabTrends({ labs }: LabTrendsProps) {
+export function LabTrends({ labs, highlightTest }: LabTrendsProps) {
+  const highlight = highlightTest?.trim().toLowerCase() ?? '';
   return (
     <section className="clinical-panel flex h-full min-h-[360px] flex-col overflow-hidden">
       <div className="border-b border-border bg-slate-50 p-4">
@@ -99,7 +102,11 @@ export function LabTrends({ labs }: LabTrendsProps) {
                 {labs.map((lab) => (
                   <tr
                     key={lab.test}
-                    className="border-b border-slate-50 transition-colors last:border-0 hover:bg-slate-50/80"
+                    className={`border-b border-slate-50 transition-colors last:border-0 hover:bg-slate-50/80 ${
+                      highlight && lab.test.toLowerCase().includes(highlight)
+                        ? 'bg-amber-50 ring-1 ring-inset ring-amber-300'
+                        : ''
+                    }`}
                   >
                     <td className="py-3">
                       <p className="font-semibold text-slate-800">{lab.test}</p>

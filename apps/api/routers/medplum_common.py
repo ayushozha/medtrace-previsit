@@ -7,6 +7,23 @@ from typing import NoReturn
 from fastapi import HTTPException, status
 
 from medtrace_agent.medplum import MedplumError
+from medtrace_agent.medplum_repository import TAG_SYSTEM
+
+
+def is_synthetic_patient(patient: dict | None) -> bool:
+    """Fail-closed boundary for the unauthenticated demo API."""
+    return bool(patient) and any(
+        isinstance(tag, dict)
+        and tag.get("system") == TAG_SYSTEM
+        and tag.get("code") == "synthetic"
+        for tag in (patient.get("meta") or {}).get("tag") or []
+    )
+
+
+def require_synthetic_patient(patient: dict | None) -> dict:
+    if not is_synthetic_patient(patient):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
+    return patient
 
 
 def raise_medplum_http(exc: MedplumError) -> NoReturn:

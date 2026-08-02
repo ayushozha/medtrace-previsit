@@ -3,39 +3,44 @@ from __future__ import annotations
 import base64
 import json
 import os
-from pathlib import Path
 from functools import cached_property
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from medtrace_agent.fireworks_config import (
+    fireworks_api_key,
+    fireworks_base_url,
+    fireworks_reasoning_effort,
+    fireworks_vlm_model,
+)
 from medtrace_agent.imaging.storage import study_preview_path
 
 
 class MedGemmaService:
-    """Connects report generation routes to MedGemma.
+    """Connects report generation routes to a vision LLM.
 
-    Supported modes:
-    - MEDGEMMA_ENDPOINT=http://... for a separate model server.
-    - MEDGEMMA_MODEL_ID=google/medgemma-4b-it for local Hugging Face inference.
-    - no env vars: deterministic mock output so the app still runs.
+    Supported modes (first match wins):
+    - ``FIREWORKS_API_KEY`` — Fireworks OpenAI-compatible VL chat (default path).
+    - ``MEDGEMMA_ENDPOINT`` — separate model server.
+    - ``MEDGEMMA_MODEL_ID`` — local Hugging Face inference.
+    - none of the above — deterministic mock so the app still runs.
     """
 
     def __init__(self) -> None:
         self.endpoint = os.getenv("MEDGEMMA_ENDPOINT")
         self.model_id = os.getenv("MEDGEMMA_MODEL_ID")
         self.device = os.getenv("MEDGEMMA_DEVICE", "auto")
-        self.nebius_api_key = os.getenv("NEBIUS_API_KEY")
-        self.nebius_base_url = os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1")
-        self.nebius_model = os.getenv("NEBIUS_QWEN_VL_MODEL")
+        self._fireworks_key = (os.getenv("FIREWORKS_API_KEY") or "").strip()
+
+    @property
+    def fireworks_configured(self) -> bool:
+        return bool(self._fireworks_key and (os.getenv("FIREWORKS_VL_MODEL") or "").strip())
 
     def generate_report(self, study_id: str, request: Any) -> dict[str, Any]:
-        if bool(self.nebius_api_key) != bool(self.nebius_model):
-            raise RuntimeError(
-                "NEBIUS_API_KEY and NEBIUS_QWEN_VL_MODEL must be configured together."
-            )
-        if self.nebius_api_key and self.nebius_model:
-            return self._generate_report_nebius_qwen(study_id, request)
+        if self.fireworks_configured:
+            return self._generate_report_fireworks(study_id, request)
 
         if self.endpoint:
             return self._generate_report_http(study_id, request)
@@ -46,21 +51,17 @@ class MedGemmaService:
         return self._mock_report(request)
 
     def status(self) -> dict[str, Any]:
-        configuration_error = bool(self.nebius_api_key) != bool(self.nebius_model)
+        ready = self.fireworks_configured
+        provider = "fireworks-vl" if ready else "http" if self.endpoint else "local" if self.model_id else "mock"
         return {
-            "provider": (
-                "configuration-error"
-                if configuration_error
-                else "qwen-vl" if self.nebius_api_key and self.nebius_model else "mock"
-            ),
-            "nebius_configured": bool(self.nebius_api_key and self.nebius_model),
-            "model": self.nebius_model if self.nebius_api_key and self.nebius_model else None,
-            "configuration_error": configuration_error,
+            "provider": provider,
+            "fireworks_configured": ready,
+            "model": fireworks_vlm_model() if ready else None,
         }
 
-    def _generate_report_nebius_qwen(self, study_id: str, request: Any) -> dict[str, Any]:
+    def _generate_report_fireworks(self, study_id: str, request: Any) -> dict[str, Any]:
         preview_path = study_preview_path(study_id)
-        image_content = []
+        image_content: list[dict[str, Any]] = []
         if preview_path.exists():
             image_content.append(
                 {
@@ -87,13 +88,13 @@ class MedGemmaService:
         )
 
         response = httpx.post(
-            f"{self.nebius_base_url.rstrip('/')}/chat/completions",
+            f"{fireworks_base_url().rstrip('/')}/chat/completions",
             headers={
-                "Authorization": f"Bearer {self.nebius_api_key}",
+                "Authorization": f"Bearer {fireworks_api_key()}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": self.nebius_model,
+                "model": fireworks_vlm_model(),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {
@@ -106,20 +107,23 @@ class MedGemmaService:
                 ],
                 "temperature": 0.2,
                 "max_tokens": 900,
+                "reasoning_effort": fireworks_reasoning_effort(),
             },
             timeout=180,
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            content = json.dumps(content)
         parsed = self._parse_report_json(content)
 
         return {
-            "summary": parsed.get("summary", "Qwen VL draft assessment"),
+            "summary": parsed.get("summary", "Fireworks VL draft assessment"),
             "findings": parsed.get("findings", content),
             "impression": parsed.get("impression", "Draft impression requires clinician verification."),
             "recommendation": parsed.get("recommendation", "Clinician review is required before sign-off."),
             "confidence": float(parsed.get("confidence", 0.5)),
-            "source": "qwen-vl",
+            "source": "fireworks-vl",
         }
 
     def _generate_report_http(self, study_id: str, request: Any) -> dict[str, Any]:
@@ -213,7 +217,7 @@ class MedGemmaService:
                 except json.JSONDecodeError:
                     pass
         return {
-            "summary": "Qwen VL draft assessment",
+            "summary": "Fireworks VL draft assessment",
             "findings": content,
             "impression": "Draft impression requires clinician verification.",
             "recommendation": "Clinician review is required before sign-off.",
@@ -223,13 +227,10 @@ class MedGemmaService:
     def _mock_report(self, request: Any) -> dict[str, Any]:
         roi_count = len(request.segmentations)
         return {
-            "summary": "Mock Qwen VL draft assessment",
+            "summary": "Mock Fireworks VL draft assessment",
             "findings": f"{request.modality} {request.body_part} study reviewed with {roi_count} segmentation ROI(s).",
-            "impression": "Draft impression placeholder until Qwen VL is configured.",
-            "recommendation": (
-                "Set both NEBIUS_API_KEY and NEBIUS_QWEN_VL_MODEL in the repo .env, then restart "
-                "the API so Qwen VL can answer from the image."
-            ),
+            "impression": "Draft impression placeholder until FIREWORKS_API_KEY is configured.",
+            "recommendation": "Set FIREWORKS_API_KEY in the repo .env and restart the API so the vision model can answer from the image.",
             "confidence": 0.78 if roi_count else 0.55,
-            "source": "qwen-vl",
+            "source": "mock",
         }

@@ -1,6 +1,7 @@
 {
   "name": "copilotkit-server",
   "version": "1.0.0",
+  "type": "module",
   "description": "Express proxy server for CopilotKit Runtime connecting to LangGraph Agent Backend",
   "main": "server.ts",
   "scripts": {

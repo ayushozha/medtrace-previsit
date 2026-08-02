@@ -10,11 +10,11 @@ Clinical AI tooling in one monorepo: **one FastAPI service** and **one React app
 - **`apps/api/`** (`apps.api.main:app`, port **8001**) — clinical routes (patients, documents,
   chat threads, derived clinical views) plus imaging routes (DICOM upload, MedSAM2 segmentation,
   draft reports).
-- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — four route surfaces: `/` and
-  `/patients/:patientId` (dashboard), `/imaging` (DICOM viewer), `/session` (voice consultation),
-  and `/yc-medplum-hackathon-demo` (synthetic sponsor-backed pre-visit flow).
+- **`apps/web/`** (Vite + React 19 + Tailwind v4, port **3000**) — `/` (landing),
+  `/patients` + `/patients/:id` (chart), `/patients/:id/imaging`,
+  `/patients/:id/session`, and `/yc-medplum-hackathon-demo`.
 
-`services/transcription/` is a preserved prototype backing the `/session` route: a LangGraph
+`services/transcription/` is a preserved prototype backing patient visit sessions: a LangGraph
 backend (8010) behind a CopilotKit Express runtime (4000). It is **not** part of `npm run dev`.
 
 Depth references: `README.md`, `AGENTS.md` (layout + gotchas), `DBMS-design.md` (canonical FHIR model).
@@ -50,14 +50,14 @@ Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MOD
 ### Tests
 
 ```bash
-.venv/bin/pytest -m "not integration"              # 61 tests
+.venv/bin/pytest -m "not integration"              # full offline suite
 .venv/bin/pytest tests/unit/test_rag_chat.py       # single file
 ```
 
 - `integration` hits the **live NCBI PubMed API** — excluded by default. `testpaths = ["tests"]`
   keeps collection out of `services/`.
-- Tests cover `src/medtrace_agent/` only. **`apps/api/` has no tests** — verify API changes with
-  the curl checks below.
+- Tests cover the shared package, provider boundaries, and selected API behavior; verify
+  browser navigation and live provider paths with the runtime checks below.
 - No Python linter/formatter is configured; pytest is the only dev dependency.
 
 ## Architecture
@@ -80,9 +80,10 @@ Optional extras: `.[medgemma-local]` (torch/transformers, only for `MEDGEMMA_MOD
 | `env.py` | `load_repo_env()` — `.env` then `.env.local`, both with `override=True`. |
 | `patient_json.py`, `tracing.py` | Demo fixtures + derivations; Langtrace/LangSmith init. |
 
-**Ownership boundary:** Medplum is canonical for patients, structured facts, source documents, and
-transcripts. Zep is a permanent but derived AI-memory/knowledge projection. A Zep outage must not
-break canonical reads or lose writes; `Task` resources drive retries.
+**Ownership boundary:** Medplum is canonical for patients, structured facts, source documents,
+imaging metadata/reports, and transcripts. Zep is a permanent but derived AI-memory/knowledge
+projection. A Zep outage must not break canonical reads or lose writes; `Task` resources drive
+retries.
 
 **Zep ontology is an AI-feature dependency, not a dashboard dependency.** `apps/api` still calls
 `auto_apply_clinical_ontology()` for semantic tools, but Medplum-backed clinical endpoints read
@@ -107,18 +108,25 @@ files; header/child `Communication` resources own chat transcripts.
 
 `GET /api/patients/{id}/snapshot` always uses the FHIR batch mapper.
 
-`/data` is mounted from repo-root `data/`, serving `data/studies/{id}/preview.png` and
-segmentation overlays. `data/studies/` is gitignored.
+Only `/data/studies` is mounted, serving the local demo viewer copy of complete DICOM
+series, previews, and segmentation overlays. Each study is linked to a canonical Patient through
+Medplum `ImagingStudy`; one representative DICOM is a patient-scoped `Binary` referenced by
+`DocumentReference`. Drafts and clinician review state are `DiagnosticReport` + `Task` resources.
+`data/studies/` is gitignored.
 
 ### Imaging model adapters (`src/medtrace_agent/imaging/model_adapters/`)
 
 `MedSAM2Service` and `MedGemmaService` resolve a mode in order: **HTTP endpoint**
 (`MEDSAM2_ENDPOINT` / `MEDGEMMA_ENDPOINT`) → **local adapter** (`MEDSAM2_ADAPTER_MODULE` /
-`MEDGEMMA_MODEL_ID`) → **deterministic mock**. Reports use Qwen VL via Nebius
-(`NEBIUS_API_KEY`, `NEBIUS_BASE_URL`, `NEBIUS_QWEN_VL_MODEL`); mock only when both key and model are absent, and fail visibly when the pair is incomplete.
+`MEDGEMMA_MODEL_ID`) → internal deterministic mock for adapter tests. Public imaging
+routes reject mock results with 503. Reports use Fireworks VL
+(`FIREWORKS_API_KEY` + `FIREWORKS_VL_MODEL`) or a configured HTTP/local provider.
 
 **DICOM handling:** `pydicom`, rescaled via `RescaleSlope`/`RescaleIntercept`, windowed via
 `WindowCenter`/`WindowWidth`. ROI prompts are normalised 0–1 and converted to pixels backend-side.
+The DICOM PatientID is never treated as application identity; API upload requires an existing
+Medplum `Patient.id`. `npm run medplum:seed` does not scan runtime studies. Synthetic DICOM import
+requires an explicit root and a study-to-chart manifest.
 
 ### Web app (`apps/web/`)
 
@@ -128,17 +136,19 @@ file mirroring `apps/api/schemas.py` (`src/lib/types.ts`).
 
 | Route | Component | Notes |
 |-------|-----------|-------|
-| `/`, `/patients/:patientId` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
-| `/imaging` | `components/imaging/` | Dark viewer (deliberate for radiology), ROI drag → segmentation |
-| `/session` | `components/session/` | **Lazy-loaded** — CopilotKit + tiptap are ~2 MB |
+| `/` | `LandingPage` | Product landing page and workspace entry point |
+| `/patients`, `/patients/:id` | `MainDashboard`, `DashboardHome` | Directory + chart, chat, documents |
+| `/patients/:id/imaging` | `components/imaging/` | Dark viewer (deliberate for radiology), ROI drag → segmentation; patient-locked |
+| `/patients/:id/session` | `components/session/` | **Lazy-loaded** — CopilotKit + tiptap are ~2 MB; patient-locked |
 | `/yc-medplum-hackathon-demo` | `components/demo/` | Synthetic chart, evidence review, Medplum write, Stedi eligibility |
 
 The session workspace and demo check-in dialog share `session.css`; the other routes are pure Tailwind.
 
-**The browser only ever talks to port 3000.** Vite proxies `/api` and `/data` to the API
+Vite proxies `/api` and `/data` to the API
 (`VITE_API_PROXY_TARGET`, default `http://127.0.0.1:8001`) and `/api/copilotkit` to the CopilotKit
 runtime. `/api/copilotkit` must stay the first proxy entry — Vite matches them in insertion order.
-`VITE_API_BASE_URL` is empty by default and only needed for a cross-origin API.
+`VITE_API_BASE_URL` is empty by default and only needed for a cross-origin API. The
+session REST client defaults to `http://localhost:8010` unless explicitly proxied.
 
 ## Non-obvious gotchas
 
@@ -148,9 +158,12 @@ runtime. `/api/copilotkit` must stay the first proxy entry — Vite matches them
   connection failure: Vite serves in ~200 ms, the API needs a second or two to start listening.
 - **`.env` inline comments break values**: dotenv treats `KEY=value  # note` as part of the value.
   Put comments on their own lines.
-- **The `/session` route needs two extra processes** (`npm run dev:transcription`). Transcription
-  uses the env-selected Gemini or OpenAI model; report generation and optional speech also require
-  explicit env-selected OpenAI-compatible model settings.
+- **Patient visit sessions (`/patients/:id/session`) and patient-chart Agent collab need two
+  extra processes** (`npm run dev:transcription`). STT/TTS use **Deepgram** (`DEEPGRAM_API_KEY`);
+  session report + chart co-pilot agents use an OpenAI-compatible chat endpoint (`OPENAI_*`).
+  Chart chat is a single CopilotKit surface (`chart_router` auto-routes to collab UI
+  updates or clinical memory). Without the transcription stack, the chart shows a
+  runtime banner instead of a second chatbot; upload remains under Memory Sources.
 - **A pydicom sample for testing uploads**:
   `.venv/bin/python -c "import pydicom.data,os;print(os.path.join(os.path.dirname(pydicom.data.__file__),'test_files','MR_small.dcm'))"`
 - **Vision ingest cost**: one multimodal call per PDF page. Cap with the `dpi` / `max_pages` form

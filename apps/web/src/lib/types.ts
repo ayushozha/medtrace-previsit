@@ -1,6 +1,6 @@
 // Types mirror apps/api/schemas.py.
 
-export type DocumentKind = 'clinical_pdf' | 'radiology_note' | 'conversation_note';
+export type DocumentKind = 'clinical_pdf' | 'radiology_note' | 'conversation_note' | 'dicom';
 export type RiskLevel = 'High' | 'Medium' | 'Low';
 export type LabStatus = 'High' | 'Normal' | 'Low' | 'Borderline';
 export type TrendDirection = 'Worsening' | 'Improving' | 'Stable';
@@ -33,6 +33,13 @@ export interface CreatePatientPayload {
   primary_doctor?: string;
   notes?: string;
   tags?: string[];
+}
+
+export interface UpdatePatientPayload {
+  display_name?: string;
+  dob?: string | null;
+  sex?: 'M' | 'F' | 'O';
+  primary_doctor?: string | null;
 }
 
 export interface DocumentRecord {
@@ -157,11 +164,19 @@ export interface ClinicalSnapshot {
   timeline: TimelinePeriod[];
   documents: DocumentRecord[];
   doctor_checklist: string[];
+  doctor_checklist_items: ChecklistItemRecord[];
+}
+
+export interface ChecklistItemRecord {
+  id: string;
+  text: string;
+  done: boolean;
+  agent_note?: string | null;
 }
 
 // ---- Imaging (apps/api/routers/studies.py) ----
 
-export type ReportSource = 'mock' | 'medgemma' | 'qwen-vl';
+export type ReportSource = 'mock' | 'medgemma' | 'fireworks-vl' | 'qwen-vl';
 export type StudyStatus = 'ready' | 'segmenting' | 'reporting';
 export type ReviewDecision = 'unreviewed' | 'accepted' | 'needs-correction';
 
@@ -170,6 +185,11 @@ export interface RoiBox {
   y: number;
   width: number;
   height: number;
+  /** Slice the box was drawn on; omitted/null means the middle slice. */
+  slice_index?: number | null;
+  /** Intensity window (HU) MedSAM2 normalizes with — from the viewer's window/level. */
+  window_lower?: number | null;
+  window_upper?: number | null;
 }
 
 export interface Segmentation {
@@ -180,7 +200,18 @@ export interface Segmentation {
   /** The API only ever returns `medsam2`; `mock` marks a client-side offline fallback. */
   source: 'medsam2' | 'mock';
   box: RoiBox;
+  /** Overlay for the prompt slice (or the whole image on the legacy 2D path). */
   overlay_url?: string | null;
+  // Volumetric fields — present only when the study is a multi-slice series.
+  prompt_slice?: number | null;
+  /** Raw uint8 mask bytes ([depth, rows, cols], C-order) for the Cornerstone labelmap. */
+  mask_url?: string | null;
+  /** [depth, rows, cols] */
+  mask_shape?: number[] | null;
+  /** [dz, dy, dx] in mm */
+  voxel_spacing_mm?: number[] | null;
+  /** Indexed by slice; null where the mask is empty on that slice. */
+  slice_overlay_urls?: (string | null)[];
 }
 
 export interface DraftReport {
@@ -190,11 +221,15 @@ export interface DraftReport {
   recommendation: string;
   confidence: number;
   source: ReportSource;
+  fhir_diagnostic_report_id?: string | null;
 }
 
 /** Server payload from `POST /api/studies`. */
 export interface StudyUpload {
   id: string;
+  patient_id: string;
+  fhir_imaging_study_id: string;
+  fhir_document_reference_id?: string | null;
   patient_name: string;
   patient_detail: string;
   modality: string;
@@ -211,6 +246,10 @@ export interface StudyUpload {
   slice_urls?: string[];
   /** True when every slice carries position/orientation/spacing — the precondition for MPR. */
   has_volume_geometry?: boolean;
+  uploaded_at?: string | null;
+  review_decision?: ReviewDecision;
+  review_note?: string | null;
+  report?: DraftReport | null;
 }
 
 /** Client-side study: the server payload plus local review state. */
@@ -226,7 +265,7 @@ export interface Study extends StudyUpload {
 
 /** The `imaging` block of `GET /api/health`. */
 export interface ImagingStatus {
-  provider: 'mock' | 'qwen-vl';
-  nebius_configured: boolean;
+  provider: 'mock' | 'fireworks-vl' | 'http' | 'local';
+  fireworks_configured: boolean;
   model: string | null;
 }

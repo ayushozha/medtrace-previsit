@@ -1,203 +1,215 @@
 """
 Voice handler for real-time speech-to-speech interaction.
+
+STT and TTS go through Deepgram (Nova + Aura). The report agent still uses an
+OpenAI-compatible chat endpoint via ``agent.graph``.
 """
+
+from __future__ import annotations
 
 import os
 from functools import cached_property
 
-from openai import OpenAI
+import httpx
 
 from agent import graph
+
+DEEPGRAM_BASE = "https://api.deepgram.com"
+
+
+def _required_model(name: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required for the Deepgram voice pipeline.")
+    return value
 
 
 class VoicePipeline:
     """
-    Orchestrates real-time speech transcription, agent reasoning, and text-to-speech generation.
+    Orchestrates speech transcription, agent reasoning, and text-to-speech.
 
-    Each capability needs a different credential, so the clients are built lazily:
-    transcription uses Gemini, the agent uses an OpenAI-compatible chat endpoint, and only
-    text-to-speech requires a real OpenAI key. Constructing the OpenAI clients eagerly used
-    to raise "Missing credentials" for every request — including Gemini-only transcription,
-    which needs no OpenAI key at all.
+    * **STT** — Deepgram ``/v1/listen`` (Nova) with neutral speaker-number diarization.
+    * **Agent** — OpenAI-compatible chat via ``OPENAI_*`` (can point at Fireworks).
+    * **TTS** — Deepgram ``/v1/speak`` (Aura); optional if the key is missing.
     """
 
-    def __init__(self):
-        self.api_key = os.environ.get("OPENAI_API_KEY") or None
-        self.base_url = os.environ.get("OPENAI_BASE_URL") or None
+    def __init__(self) -> None:
+        self.deepgram_api_key = (
+            os.environ.get("DEEPGRAM_API_KEY") or os.environ.get("DG_API_KEY") or None
+        )
 
-    def _require_openai_key(self) -> str:
-        if not self.api_key:
+    def _require_deepgram_key(self) -> str:
+        if not self.deepgram_api_key:
             raise RuntimeError(
-                "Text-to-speech needs OPENAI_API_KEY in the repo .env "
-                "(transcription uses GEMINI_API_KEY; the agent can use any "
-                "OpenAI-compatible endpoint via OPENAI_BASE_URL)."
+                "DEEPGRAM_API_KEY is required for voice transcription/TTS. "
+                "Get a key at https://console.deepgram.com/"
             )
-        return self.api_key
+        return self.deepgram_api_key
 
     @cached_property
-    def client(self) -> OpenAI:
-        """Configured endpoint — honours OPENAI_BASE_URL for OpenAI-compatible providers."""
-        return OpenAI(api_key=self._require_openai_key(), base_url=self.base_url)
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Token {self._require_deepgram_key()}"}
 
-    @cached_property
-    def fallback_client(self) -> OpenAI:
-        """Audio endpoints are OpenAI-only, so fall back to api.openai.com."""
-        return OpenAI(api_key=self._require_openai_key(), base_url="https://api.openai.com/v1")
-
-    DIARIZE_INSTRUCTION = (
-        "You are an expert medical transcriptionist. Transcribe the provided audio between a "
-        "clinician and a patient. Segment the conversation accurately into alternating speaker "
-        "turns, labelling each line clearly as either 'Clinician: [speech]' or "
-        "'Patient: [speech]' based on who is speaking (speaker diarization). Do not add any "
-        "other commentary, introductions, or summaries. Return only the diarized transcription."
-    )
-
-    async def transcribe_audio(self, audio_bytes: bytes) -> str:
-        """Transcribe audio into a diarized ``Clinician:`` / ``Patient:`` transcript.
-
-        Two providers, whichever is configured:
-
-        * **Gemini** (``GEMINI_API_KEY``) — one call does transcription *and* diarization.
-        * **OpenAI** (``OPENAI_API_KEY``) — Whisper transcribes, then the chat model labels
-          the speaker turns, since Whisper does not diarize.
-        """
-        gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if gemini_key:
-            return await self._transcribe_gemini(audio_bytes, gemini_key)
-        if self.api_key:
-            return await self._transcribe_openai(audio_bytes)
-        raise ValueError(
-            "No transcription provider configured. Set GEMINI_API_KEY (Gemini) or "
-            "OPENAI_API_KEY (Whisper) in the repo .env."
-        )
-
-    async def _transcribe_gemini(self, audio_bytes: bytes, gemini_key: str) -> str:
-        import base64
-        import httpx
-
-        is_mp3 = (
+    @staticmethod
+    def _audio_content_type(audio_bytes: bytes) -> str:
+        """Detect common browser/upload containers without relabeling them as WAV."""
+        if audio_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+            return "audio/webm"
+        if audio_bytes.startswith(b"OggS"):
+            return "audio/ogg"
+        if audio_bytes.startswith(b"fLaC"):
+            return "audio/flac"
+        if len(audio_bytes) >= 12 and audio_bytes.startswith(b"RIFF") and audio_bytes[8:12] == b"WAVE":
+            return "audio/wav"
+        if len(audio_bytes) >= 8 and audio_bytes[4:8] == b"ftyp":
+            return "audio/mp4"
+        if (
             audio_bytes.startswith(b"ID3")
             or audio_bytes.startswith(b"\xff\xfb")
             or audio_bytes.startswith(b"\xff\xf3")
             or audio_bytes.startswith(b"\xff\xf2")
-        )
-        mime_type = "audio/mp3" if is_mp3 else "audio/wav"
+        ):
+            return "audio/mpeg"
+        return "application/octet-stream"
+
+    @staticmethod
+    def _normalize_audio_content_type(content_type: str | None) -> str | None:
+        if not content_type:
+            return None
+        media_type = content_type.partition(";")[0].strip().lower()
+        return media_type if media_type.startswith("audio/") else None
+
+    @staticmethod
+    def _speaker_label(speaker: int | None) -> str:
+        """Keep diarization neutral; a speaker index does not establish a clinical role."""
+        return f"Speaker {speaker}" if speaker is not None and speaker >= 0 else "Speaker"
+
+    @classmethod
+    def _format_diarized_transcript(cls, payload: dict) -> str:
+        """Build neutral ``Speaker N:`` lines from Deepgram utterances or words."""
+        results = payload.get("results") or {}
+        utterances = results.get("utterances") or []
+        if utterances:
+            lines: list[str] = []
+            for utt in utterances:
+                text = (utt.get("transcript") or "").strip()
+                if not text:
+                    continue
+                raw_speaker = utt.get("speaker")
+                label = cls._speaker_label(int(raw_speaker) if raw_speaker is not None else None)
+                lines.append(f"{label}: {text}")
+            if lines:
+                return "\n".join(lines)
+
+        # Fallback: group consecutive words by speaker.
+        channels = results.get("channels") or []
+        if not channels:
+            return ""
+        alternatives = (channels[0] or {}).get("alternatives") or []
+        if not alternatives:
+            return ""
+        words = alternatives[0].get("words") or []
+        if not words:
+            return (alternatives[0].get("transcript") or "").strip()
+
+        lines = []
+        current_speaker: int | None = None
+        current_words: list[str] = []
+        for word in words:
+            raw_speaker = word.get("speaker")
+            speaker = int(raw_speaker) if raw_speaker is not None else -1
+            token = (word.get("punctuated_word") or word.get("word") or "").strip()
+            if not token:
+                continue
+            if current_speaker is None:
+                current_speaker = speaker
+            if speaker != current_speaker:
+                if current_words:
+                    label = cls._speaker_label(current_speaker)
+                    lines.append(f"{label}: {' '.join(current_words)}")
+                current_speaker = speaker
+                current_words = [token]
+            else:
+                current_words.append(token)
+        if current_words and current_speaker is not None:
+            label = cls._speaker_label(current_speaker)
+            lines.append(f"{label}: {' '.join(current_words)}")
+        return "\n".join(lines)
+
+    async def transcribe_audio(self, audio_bytes: bytes, content_type: str | None = None) -> str:
+        """Transcribe audio into a neutral diarized transcript via Deepgram Nova."""
+        self._require_deepgram_key()
+        if not audio_bytes:
+            return ""
+
+        params = {
+            "model": _required_model("DEEPGRAM_MODEL"),
+            "diarize_model": _required_model("DEEPGRAM_DIARIZE_MODEL"),
+            "utterances": "true",
+            "smart_format": "true",
+            "punctuate": "true",
+        }
+        headers = {
+            **self._auth_headers,
+            "Content-Type": self._normalize_audio_content_type(content_type)
+            or self._audio_content_type(audio_bytes),
+        }
 
         try:
-            base64_data = base64.b64encode(audio_bytes).decode("utf-8")
-            gemini_model = (os.environ.get("GEMINI_TRANSCRIBE_MODEL") or "").strip()
-            if not gemini_model:
-                raise RuntimeError("GEMINI_TRANSCRIBE_MODEL is required for Gemini transcription.")
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{gemini_model}:generateContent?key={gemini_key}"
-            )
-            payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"inlineData": {"mimeType": mime_type, "data": base64_data}},
-                            {"text": self.DIARIZE_INSTRUCTION},
-                        ]
-                    }
-                ]
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=60.0)
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{DEEPGRAM_BASE}/v1/listen",
+                    params=params,
+                    headers=headers,
+                    content=audio_bytes,
+                )
                 response.raise_for_status()
-                transcript = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-                print(f"[STT] Gemini transcription successful:\n{transcript}")
-                return transcript
-        except Exception as e:
-            print(f"[STT] Gemini transcription failed: {e}")
-            raise
-
-    async def _transcribe_openai(self, audio_bytes: bytes) -> str:
-        """Whisper for the words, then the chat model for the speaker labels."""
-        import asyncio
-
-        is_mp3 = (
-            audio_bytes.startswith(b"ID3")
-            or audio_bytes.startswith(b"\xff\xfb")
-            or audio_bytes.startswith(b"\xff\xf3")
-            or audio_bytes.startswith(b"\xff\xf2")
-        )
-        filename = "audio.mp3" if is_mp3 else "audio.wav"
-        stt_model = (os.environ.get("OPENAI_TRANSCRIBE_MODEL") or "").strip()
-        chat_model = (os.environ.get("OPENAI_MODEL") or "").strip()
-        if not stt_model or not chat_model:
-            raise RuntimeError("OPENAI_TRANSCRIBE_MODEL and OPENAI_MODEL are required.")
-
-        def _run() -> str:
-            # Audio endpoints live on OpenAI proper, so use the direct client.
-            raw = self.fallback_client.audio.transcriptions.create(
-                model=stt_model,
-                file=(filename, audio_bytes),
-                response_format="text",
-            )
-            text = (raw if isinstance(raw, str) else getattr(raw, "text", "")).strip()
-            if not text:
-                return ""
-
-            labelled = self.fallback_client.chat.completions.create(
-                model=chat_model,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": self.DIARIZE_INSTRUCTION},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Label the speaker turns in this consultation transcript. "
-                            "Return only the labelled lines.\n\n" + text
-                        ),
-                    },
-                ],
-            )
-            return (labelled.choices[0].message.content or text).strip()
-
-        try:
-            transcript = await asyncio.to_thread(_run)
-            print(f"[STT] Whisper transcription successful:\n{transcript}")
+                payload = response.json()
+            transcript = self._format_diarized_transcript(payload)
+            print(f"[STT] Deepgram transcription successful:\n{transcript}")
             return transcript
         except Exception as e:
-            print(f"[STT] Whisper transcription failed: {e}")
+            print(f"[STT] Deepgram transcription failed: {e}")
             raise
 
     async def generate_speech(self, text: str) -> bytes:
-        """
-        Converts text response to speech audio bytes using OpenAI TTS.
-        """
-        if not self.api_key:
-            # Speech output is optional; the transcript and report still work without it.
-            print("[TTS] OPENAI_API_KEY not set — skipping speech synthesis.")
+        """Convert text to speech audio bytes using Deepgram Aura TTS."""
+        text = (text or "").strip()
+        if not text:
             return b""
-        try:
-            tts_model = (os.environ.get("OPENAI_TTS_MODEL") or "").strip()
-            tts_voice = (os.environ.get("OPENAI_TTS_VOICE") or "").strip()
-            if not tts_model or not tts_voice:
-                raise RuntimeError("OPENAI_TTS_MODEL and OPENAI_TTS_VOICE are required for speech output.")
-            response = self.client.audio.speech.create(
-                model=tts_model,
-                voice=tts_voice,
-                input=text,
-                response_format="mp3"
-            )
-            return response.content
-        except Exception as e:
-            print(f"[TTS] Custom endpoint failed, trying fallback: {e}")
-            try:
-                response = self.fallback_client.audio.speech.create(
-                    model=tts_model,
-                    voice=tts_voice,
-                    input=text,
-                    response_format="mp3"
-                )
-                return response.content
-            except Exception as fallback_err:
-                print(f"[TTS] Fallback failed too: {fallback_err}. Returning empty speech content.")
-                return b""
+        if not self.deepgram_api_key:
+            print("[TTS] DEEPGRAM_API_KEY not set — skipping speech synthesis.")
+            return b""
 
-    async def run_agent_pipeline(self, text: str, document: str = None, thread_id: str = "voice_session") -> dict:
+        params = {
+            "model": _required_model("DEEPGRAM_TTS_MODEL"),
+            "encoding": "mp3",
+        }
+        headers = {
+            **self._auth_headers,
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{DEEPGRAM_BASE}/v1/speak",
+                    params=params,
+                    headers=headers,
+                    json={"text": text},
+                )
+                response.raise_for_status()
+                return response.content
+        except Exception as e:
+            print(f"[TTS] Deepgram speech synthesis failed: {e}. Returning empty speech content.")
+            return b""
+
+    async def run_agent_pipeline(
+        self,
+        text: str,
+        document: str = None,
+        thread_id: str = "voice_session",
+    ) -> dict:
         """
         Passes user input through the compiled co-editor LangGraph graph and returns the verbal response and document updates.
         """
@@ -214,14 +226,18 @@ class VoicePipeline:
 
         # Append new user message
         from langchain_core.messages import HumanMessage
+
         messages.append(HumanMessage(content=text))
 
         # Execute agent graph
-        result_state = await graph.ainvoke({
-            "messages": messages,
-            "tools": [],
-            "document": document
-        }, config=config)
+        result_state = await graph.ainvoke(
+            {
+                "messages": messages,
+                "tools": [],
+                "document": document,
+            },
+            config=config,
+        )
 
         # Extract verbal response from the newly generated assistant messages
         verbal_response = "I have updated the document."
@@ -244,5 +260,5 @@ class VoicePipeline:
 
         return {
             "verbal_response": verbal_response,
-            "document": new_document
+            "document": new_document,
         }

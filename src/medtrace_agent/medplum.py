@@ -221,16 +221,41 @@ class MedplumClient:
         rows = self.search(resource_type, {**params, "_count": 1})
         return rows[0] if rows else None
 
-    def create_binary(self, data: bytes, *, content_type: str) -> dict[str, Any]:
+    def create_binary(
+        self,
+        data: bytes,
+        *,
+        content_type: str,
+        security_context: str | None = None,
+    ) -> dict[str, Any]:
+        headers = {"Content-Type": content_type or "application/octet-stream"}
+        if security_context:
+            # Medplum uses this FHIR header to set Binary.securityContext at upload
+            # time.  Without it, patient files fall back to project-wide Binary
+            # permissions rather than inheriting the patient's compartment access.
+            headers["X-Security-Context"] = security_context
         return self._request(
             "POST",
             "Binary",
             content=data,
-            headers={"Content-Type": content_type or "application/octet-stream"},
+            headers=headers,
         )
 
     def read_binary(self, binary_id: str) -> bytes:
         return self._request("GET", f"Binary/{binary_id}", headers={"Accept": "*/*"}, expect_json=False)
+
+    def update_binary(
+        self,
+        binary_id: str,
+        data: bytes,
+        *,
+        content_type: str,
+        security_context: str | None = None,
+    ) -> dict[str, Any]:
+        headers = {"Content-Type": content_type or "application/octet-stream"}
+        if security_context:
+            headers["X-Security-Context"] = security_context
+        return self._request("PUT", f"Binary/{binary_id}", content=data, headers=headers)
 
     def validate(self, resource: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", f"{resource['resourceType']}/$validate", json=resource)

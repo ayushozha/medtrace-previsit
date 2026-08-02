@@ -2,14 +2,19 @@ import { Suspense, lazy } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AppNav } from './components/AppNav';
-import { DashboardHome } from './components/DashboardHome';
+import { LandingPage } from './components/LandingPage';
 import { MainDashboard } from './components/MainDashboard';
 import { ImagingWorkspace } from './components/imaging/ImagingWorkspace';
 
-// CopilotKit + tiptap pull in ~2 MB of syntax-highlighting and diagram code. Loading the
-// session route on demand keeps that out of the patients and imaging bundles.
+// CopilotKit pulls in a heavy runtime. Lazy-load session + patient-chart collab so
+// the directory and imaging routes stay light.
 const SessionWorkspace = lazy(() =>
   import('./components/session/SessionWorkspace').then((m) => ({ default: m.SessionWorkspace })),
+);
+const PatientChartWorkspace = lazy(() =>
+  import('./components/dashboard/PatientChartWorkspace').then((m) => ({
+    default: m.PatientChartWorkspace,
+  })),
 );
 const YcMedplumHackathonDemo = lazy(() =>
   import('./components/demo/YcMedplumHackathonDemo').then((m) => ({
@@ -30,11 +35,20 @@ function PatientDirectoryRoute() {
   return <MainDashboard onSelectPatient={(id) => navigate(`/patients/${id}`)} />;
 }
 
-function PatientChartRoute() {
+function PatientImagingRoute() {
   const { patientId } = useParams<{ patientId: string }>();
-  const navigate = useNavigate();
-  if (!patientId) return <Navigate to="/" replace />;
-  return <DashboardHome patientId={patientId} onBack={() => navigate('/')} />;
+  if (!patientId) return <Navigate to="/patients" replace />;
+  return <ImagingWorkspace key={patientId} patientId={patientId} />;
+}
+
+function PatientSessionRoute() {
+  const { patientId } = useParams<{ patientId: string }>();
+  if (!patientId) return <Navigate to="/patients" replace />;
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <SessionWorkspace key={patientId} patientId={patientId} />
+    </Suspense>
+  );
 }
 
 export default function App() {
@@ -43,17 +57,21 @@ export default function App() {
       <AppNav />
       <main>
         <Routes>
-          <Route path="/" element={<PatientDirectoryRoute />} />
-          <Route path="/patients/:patientId" element={<PatientChartRoute />} />
-          <Route path="/imaging" element={<ImagingWorkspace />} />
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/patients" element={<PatientDirectoryRoute />} />
           <Route
-            path="/session"
+            path="/patients/:patientId"
             element={
               <Suspense fallback={<RouteFallback />}>
-                <SessionWorkspace />
+                <PatientChartWorkspace />
               </Suspense>
             }
           />
+          <Route path="/patients/:patientId/imaging" element={<PatientImagingRoute />} />
+          <Route path="/patients/:patientId/session" element={<PatientSessionRoute />} />
+          {/* Legacy top-level routes — imaging/session require a patient context. */}
+          <Route path="/imaging" element={<Navigate to="/patients" replace />} />
+          <Route path="/session" element={<Navigate to="/patients" replace />} />
           <Route
             path="/yc-medplum-hackathon-demo"
             element={

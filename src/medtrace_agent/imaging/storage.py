@@ -1,11 +1,12 @@
 """On-disk layout for imaging studies.
 
-Single source of truth for where study files live. Everything sits under the repo-root
-``data/`` directory alongside the other data folders (historical imports,
-``data/radiology_note``, …) and is served by FastAPI at ``/data``.
+Single source of truth for where study files live. Everything sits under repo-root
+``data/studies/``; FastAPI mounts only that imaging subtree at ``/data/studies``.
 
     data/studies/{study_id}/preview.png
-    data/studies/{study_id}/segmentations/{segmentation_id}.png
+    data/studies/{study_id}/segmentations/{segmentation_id}.png           (legacy 2D masks)
+    data/studies/{study_id}/segmentations/{segmentation_id}/              (volumetric masks)
+        mask.bin · meta.json · slices/{i:04d}.png
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def data_dir() -> Path:
-    """Repo-root ``data/`` — the directory mounted at ``/data``."""
+    """Repo-root ``data/``; only its ``studies`` child is served."""
     return _REPO_ROOT / "data"
 
 
@@ -40,6 +41,20 @@ def study_preview_path(study_id: str) -> Path:
 
 def study_overlay_url(study_id: str, segmentation_id: str) -> str:
     return f"/data/studies/{study_id}/segmentations/{segmentation_id}.png"
+
+
+def segmentation_dir(study_id: str, segmentation_id: str) -> Path:
+    """Directory holding one volumetric segmentation's artifacts."""
+    return study_dir(study_id) / "segmentations" / segmentation_id
+
+
+def segmentation_mask_url(study_id: str, segmentation_id: str) -> str:
+    """Raw uint8 ``[D, H, W]`` mask bytes, loaded whole by the viewer as a labelmap."""
+    return f"/data/studies/{study_id}/segmentations/{segmentation_id}/mask.bin"
+
+
+def segmentation_slice_overlay_url(study_id: str, segmentation_id: str, slice_index: int) -> str:
+    return f"/data/studies/{study_id}/segmentations/{segmentation_id}/slices/{slice_index:04d}.png"
 
 
 def study_preview_url(study_id: str) -> str:

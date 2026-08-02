@@ -269,9 +269,9 @@ export function AIChatPanel({
                   {uploading ? <Loader2 size={14} className="animate-spin" /> : <Paperclip size={14} />}
                 </button>
                 <Link
-                  to="/session"
+                  to={`/patients/${patientId}/session`}
                   className="rounded-md p-1.5 transition-colors hover:bg-slate-100 hover:text-slate-700"
-                  title="Record a voice consultation"
+                  title="Record a visit session for this patient"
                 >
                   <Mic size={14} />
                 </Link>

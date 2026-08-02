@@ -9,7 +9,11 @@ from fastapi import APIRouter, HTTPException, status
 from langgraph.checkpoint.memory import MemorySaver
 
 from apps.api.dependencies import RequireMedplumDep
-from apps.api.routers.medplum_common import document_catalog, raise_medplum_http
+from apps.api.routers.medplum_common import (
+    document_catalog,
+    raise_medplum_http,
+    require_synthetic_patient,
+)
 from apps.api.schemas import ChatMessageOut, ChatThreadOut, CreateThreadIn, SendMessageIn, SendMessageOut
 from medtrace_agent.fireworks_config import fireworks_chat_model
 from medtrace_agent.medplum import MedplumError
@@ -30,9 +34,7 @@ def _patient_or_404(patient_id: str) -> dict:
         patient = repository().get_patient(patient_id)
     except MedplumError as exc:
         raise_medplum_http(exc)
-    if not patient:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
-    return patient
+    return require_synthetic_patient(patient)
 
 
 def _patient_name(patient: dict) -> str:
@@ -81,6 +83,8 @@ def list_messages(zep_thread_id: str, lastn: int = 50) -> list[ChatMessageOut]:
         thread = repo.thread_by_zep(zep_thread_id)
         if not thread:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thread not found.")
+        patient_id = str((thread.get("subject") or {}).get("reference") or "").removeprefix("Patient/")
+        require_synthetic_patient(repo.get_patient(patient_id))
         return [ChatMessageOut.model_validate(repo.message_view(row)) for row in repo.list_messages(str(thread["id"]), limit=lastn)]
     except MedplumError as exc:
         raise_medplum_http(exc)
@@ -98,19 +102,18 @@ def send_message(zep_thread_id: str, body: SendMessageIn) -> SendMessageOut:
         if not thread:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thread not found.")
         patient_id = str((thread.get("subject") or {}).get("reference") or "").removeprefix("Patient/")
-        patient = repo.get_patient(patient_id)
-        if not patient:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found.")
+        patient = require_synthetic_patient(repo.get_patient(patient_id))
 
-        existing_user = repo.message_by_request(request_id, "user")
-        existing_assistant = repo.message_by_request(request_id, "assistant")
+        thread_id = str(thread["id"])
+        existing_user = repo.message_by_request(thread_id, request_id, "user")
+        existing_assistant = repo.message_by_request(thread_id, request_id, "assistant")
         if existing_user and existing_assistant:
             return SendMessageOut(
                 user=ChatMessageOut.model_validate(repo.message_view(existing_user)),
                 assistant=ChatMessageOut.model_validate(repo.message_view(existing_assistant)),
             )
 
-        prior_messages = [repo.message_view(row) for row in repo.list_messages(str(thread["id"]), limit=100)]
+        prior_messages = [repo.message_view(row) for row in repo.list_messages(thread_id, limit=100)]
         user_message = existing_user or repo.create_message(
             thread=thread,
             patient_id=patient_id,
@@ -177,7 +180,7 @@ def send_message(zep_thread_id: str, body: SendMessageIn) -> SendMessageOut:
         )
         task = repo.create_zep_projection_task(
             patient_id=patient_id,
-            thread_id=str(thread["id"]),
+            thread_id=thread_id,
             user_message_id=str(user_message["id"]),
             assistant_message_id=str(assistant_message["id"]),
             request_id=request_id,
